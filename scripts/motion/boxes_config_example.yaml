@@ -1,0 +1,29 @@
+# Example config for scripts/motion/boxes_to_stl.py
+# Usage: python scripts/motion/boxes_to_stl.py --config boxes_config_example.yaml --output my_terrain.stl
+
+boxes:
+  # # Flat ground plate
+  # - size: [2.0, 2.0, 0.1]
+  #   position: [0.0, 0.0, 0.05]
+
+  # # Box 1: upright
+  # - size: [0.4, 0.4, 0.3]
+  #   position: [0.3, 0.0, 0.25]
+  #   # euler_deg: [roll, pitch, yaw] in degrees (optional)
+  #   # euler_rad: [roll, pitch, yaw] in radians (optional)
+
+  # # Box 2: rotated around Z
+  # - size: [0.2, 0.5, 0.15]
+  #   position: [-0.2, 0.2, 0.225]
+  #   euler_deg: [0, 0, 30]
+
+  # # Box 3: tilted (pitch)
+  # - size: [0.3, 0.3, 0.2]
+  #   position: [0.0, -0.3, 0.2]
+  #   euler_deg: [0, 10, 0]
+
+  # Box 1: upright
+  - size: [1.5, 0.5, 0.5]
+    position: [0.0, 0.0, 0.0]
+    # euler_deg: [roll, pitch, yaw] in degrees (optional)
+    # euler_rad: [roll, pitch, yaw] in radians (optional)

@@ -1,0 +1,453 @@
+# BSD 3-Clause License
+# Copyright (c) 2025-2026, Beijing Noetix Robotics TECHNOLOGY CO.,LTD.
+# All rights reserved.
+
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+from itertools import chain
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from rsl_rl.modules import Discriminator, ActorCritic
+from rsl_rl.modules.rnd import RandomNetworkDistillation
+from rsl_rl.storage import HimRolloutStorage, ReplayBuffer
+from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.utils import string_to_callable
+
+
+class AMPPPO(PPO):
+    """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347)."""
+
+    policy: ActorCritic
+    discriminator: Discriminator
+    """The actor critic module."""
+
+    def __init__(
+        self,
+        policy,
+        discriminator,
+        amp_expert_data,
+        amp_state_normalizer,
+        amp_style_reward_normalizer,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        clip_param=0.2,
+        gamma=0.99,
+        lam=0.95,
+        value_loss_coef=1.0,
+        entropy_coef=0.01,
+        learning_rate=0.001,
+        max_grad_norm=1.0,
+        use_clipped_value_loss=True,
+        schedule="adaptive",
+        desired_kl=0.01,
+        device="cpu",
+        discriminator_learning_rate=1e-3,
+        discriminator_gradient_penalty_coef=5,
+        discriminator_num_mini_batches=10,
+        amp_replay_buffer_size=100000,
+        discriminator_loss_function="MSELoss",
+        normalize_advantage_per_mini_batch=False,
+        # RND parameters
+        rnd_cfg: dict | None = None,
+        # Symmetry parameters
+        symmetry_cfg: dict | None = None,
+        # Distributed training parameters
+        multi_gpu_cfg: dict | None = None,
+    ):
+        super().__init__(
+            policy,
+            num_learning_epochs,
+            num_mini_batches,
+            clip_param,
+            gamma,
+            lam,
+            value_loss_coef,
+            entropy_coef,
+            learning_rate,
+            max_grad_norm,
+            use_clipped_value_loss,
+            schedule,
+            desired_kl,
+            device,
+            normalize_advantage_per_mini_batch,
+            # RND parameters
+            rnd_cfg,
+            # Symmetry parameters
+            symmetry_cfg,
+            # Distributed training parameters
+            multi_gpu_cfg,
+        )
+
+        # Discriminator components
+        self.discriminator = discriminator
+        self.discriminator.to(self.device)
+        self.amp_policy_data = ReplayBuffer(
+            discriminator.observation_dim, discriminator.observation_horizon, amp_replay_buffer_size, device
+        )
+        self.amp_expert_data = amp_expert_data
+        self.amp_state_normalizer = amp_state_normalizer
+        self.amp_style_reward_normalizer = amp_style_reward_normalizer
+
+        # Discriminator parameters
+        self.discriminator_gradient_penalty_coef = discriminator_gradient_penalty_coef
+        self.discriminator_loss_function = discriminator_loss_function
+        self.discriminator_num_mini_batches = discriminator_num_mini_batches
+
+        # Pre-instantiate loss functions to avoid repeated creation
+        if discriminator_loss_function == "BCEWithLogitsLoss":
+            self.disc_loss_fn = nn.BCEWithLogitsLoss()
+        elif discriminator_loss_function == "MSELoss":
+            self.disc_loss_fn = nn.MSELoss()
+        else:
+            self.disc_loss_fn = None  # For WassersteinLoss, we use custom computation
+
+        # Create optimizer
+        params = [
+            {"params": self.discriminator.architecture.parameters(), "weight_decay": 10e-4, "name": "amp_trunk"},
+            {"params": self.discriminator.discriminator_logits.parameters(), "weight_decay": 10e-2, "name": "amp_head"},
+        ]
+        self.discriminator_optimizer = optim.Adam(params, lr=discriminator_learning_rate, betas=(0.0, 0.9))
+
+    def process_env_step(self, obs, rewards, dones, extras, amp_observation_buf):
+        super().process_env_step(obs, rewards, dones, extras)
+        # record the amp data
+        self.amp_policy_data.insert(amp_observation_buf)
+
+    def update(self):  # noqa: C901
+        # -- PPO loss
+        mean_value_loss = 0
+        mean_surrogate_loss = 0
+        mean_entropy = 0
+        # -- AMP loss
+        mean_discriminator_loss = 0
+        mean_policy_pred = 0
+        mean_expert_pred = 0
+        # -- RND loss
+        if self.rnd:
+            mean_rnd_loss = 0
+        else:
+            mean_rnd_loss = None
+        # -- Symmetry loss
+        if self.symmetry:
+            mean_symmetry_loss = 0
+        else:
+            mean_symmetry_loss = None
+
+        # generator for mini batches
+        if self.policy.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        else:
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+
+        # generator for amp batches
+        amp_policy_generator = self.amp_policy_data.feed_forward_generator(
+            self.num_learning_epochs * self.num_mini_batches,
+            self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches,
+        )
+        amp_expert_generator = self.amp_expert_data.feed_forward_generator(
+            self.num_learning_epochs * self.num_mini_batches,
+            self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches,
+        )
+
+        for sample, sample_amp_policy, sample_expert_data in zip(generator, amp_policy_generator, amp_expert_generator):
+
+            (
+                obs_batch,
+                actions_batch,
+                target_values_batch,
+                advantages_batch,
+                returns_batch,
+                old_actions_log_prob_batch,
+                old_mu_batch,
+                old_sigma_batch,
+                hid_states_batch,
+                masks_batch,
+            ) = sample
+
+            # number of augmentations per sample
+            # we start with 1 and increase it if we use symmetry augmentation
+            num_aug = 1
+            # original batch size
+            # we assume policy group is always there and needs augmentation
+            original_batch_size = obs_batch.batch_size[0]
+
+            # check if we should normalize advantages per mini batch
+            if self.normalize_advantage_per_mini_batch:
+                with torch.no_grad():
+                    advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
+
+            # Perform symmetric augmentation
+            if self.symmetry and self.symmetry["use_data_augmentation"]:
+                # augmentation using symmetry
+                data_augmentation_func = self.symmetry["data_augmentation_func"]
+                # returned shape: [batch_size * num_aug, ...]
+                obs_batch, actions_batch = data_augmentation_func(
+                    obs=obs_batch,
+                    actions=actions_batch,
+                    env=self.symmetry["_env"],
+                )
+                # compute number of augmentations per sample
+                # we assume policy group is always there and needs augmentation
+                num_aug = int(obs_batch.batch_size[0] / original_batch_size)
+                # repeat the rest of the batch
+                # -- actor
+                old_actions_log_prob_batch = old_actions_log_prob_batch.repeat(num_aug, 1)
+                # -- critic
+                target_values_batch = target_values_batch.repeat(num_aug, 1)
+                advantages_batch = advantages_batch.repeat(num_aug, 1)
+                returns_batch = returns_batch.repeat(num_aug, 1)
+
+            # Recompute actions log prob and entropy for current batch of transitions
+            # Note: we need to do this because we updated the policy with the new parameters
+            # -- actor
+            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
+            # -- critic
+            value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+            # -- entropy
+            # we only keep the entropy of the first augmentation (the original one)
+            mu_batch = self.policy.action_mean[:original_batch_size]
+            sigma_batch = self.policy.action_std[:original_batch_size]
+            entropy_batch = self.policy.entropy[:original_batch_size]
+
+            # KL
+            if self.desired_kl is not None and self.schedule == "adaptive":
+                with torch.inference_mode():
+                    kl = torch.sum(
+                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                        / (2.0 * torch.square(sigma_batch))
+                        - 0.5,
+                        axis=-1,
+                    )
+                    kl_mean = torch.mean(kl)
+
+                    # Reduce the KL divergence across all GPUs
+                    if self.is_multi_gpu:
+                        torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
+                        kl_mean /= self.gpu_world_size
+
+                    # Update the learning rate
+                    # Perform this adaptation only on the main process
+                    # TODO: Is this needed? If KL-divergence is the "same" across all GPUs,
+                    #       then the learning rate should be the same across all GPUs.
+                    if self.gpu_global_rank == 0:
+                        if kl_mean > self.desired_kl * 2.0:
+                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                    # Update the learning rate for all GPUs
+                    if self.is_multi_gpu:
+                        lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                        torch.distributed.broadcast(lr_tensor, src=0)
+                        self.learning_rate = lr_tensor.item()
+
+                    # Update the learning rate for all parameter groups
+                    for param_group in self.optimizer.param_groups:
+                        param_group["lr"] = self.learning_rate
+
+            # Surrogate loss
+            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+            surrogate = -torch.squeeze(advantages_batch) * ratio
+            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
+                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+            )
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            # Value function loss
+            if self.use_clipped_value_loss:
+                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
+                    -self.clip_param, self.clip_param
+                )
+                value_losses = (value_batch - returns_batch).pow(2)
+                value_losses_clipped = (value_clipped - returns_batch).pow(2)
+                value_loss = torch.max(value_losses, value_losses_clipped).mean()
+            else:
+                value_loss = (returns_batch - value_batch).pow(2).mean()
+
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+
+            # Discriminator update (before PPO update to avoid gradient conflicts)
+            sample_amp_expert, _ = sample_expert_data[0], sample_expert_data[1]
+            # Discriminator loss
+            if self.amp_state_normalizer is not None:
+                with torch.no_grad():
+                    # Reshape to [batch_size * horizon, obs_dim] for batch normalization
+                    policy_flat = sample_amp_policy.view(-1, sample_amp_policy.shape[-1])
+                    expert_flat = sample_amp_expert.view(-1, sample_amp_expert.shape[-1])
+
+                    # Batch normalize all frames at once
+                    policy_flat_norm = self.amp_state_normalizer.normalize_torch(policy_flat, self.device)
+                    expert_flat_norm = self.amp_state_normalizer.normalize_torch(expert_flat, self.device)
+
+                    # Flatten to final shape
+                    policy_data = policy_flat_norm.view(sample_amp_policy.shape[0], -1)
+                    expert_data = expert_flat_norm.view(sample_amp_expert.shape[0], -1)
+            else:
+                policy_data = sample_amp_policy.flatten(1, 2)
+                expert_data = sample_amp_expert.flatten(1, 2)
+
+            policy_d = self.discriminator(policy_data)
+            expert_d = self.discriminator(expert_data)
+
+            if self.discriminator_loss_function == "BCEWithLogitsLoss":
+                expert_loss = self.disc_loss_fn(expert_d, torch.ones_like(expert_d))
+                policy_loss = self.disc_loss_fn(policy_d, torch.zeros_like(policy_d))
+                grad_pen_loss = self.discriminator.compute_grad_pen(
+                    expert_data, lambda_=self.discriminator_gradient_penalty_coef
+                )
+            elif self.discriminator_loss_function == "MSELoss":
+                expert_loss = self.disc_loss_fn(expert_d, torch.ones_like(expert_d))
+                policy_loss = self.disc_loss_fn(policy_d, -torch.ones_like(policy_d))
+                grad_pen_loss = self.discriminator.compute_grad_pen(
+                    expert_data, lambda_=self.discriminator_gradient_penalty_coef
+                )
+            elif self.discriminator_loss_function == "WassersteinLoss":
+                expert_loss = -torch.tanh(0.3 * expert_d).mean()
+                policy_loss = torch.tanh(0.3 * policy_d).mean()
+                grad_pen_loss = self.discriminator.compute_wgan_grad_pen(expert_data, policy_data)
+            else:
+                raise ValueError("Unexpected loss function specified")
+
+            amp_loss = 0.5 * (expert_loss + policy_loss)
+
+            discriminator_loss = amp_loss + grad_pen_loss
+
+            self.discriminator_optimizer.zero_grad()
+            discriminator_loss.backward()
+            self.discriminator_optimizer.step()
+
+            if self.amp_state_normalizer is not None:
+                self.amp_state_normalizer.update(sample_amp_policy[:, 0].cpu().numpy())
+                self.amp_state_normalizer.update(sample_amp_expert[:, 0].cpu().numpy())
+
+            # Symmetry loss
+            if self.symmetry:
+                # obtain the symmetric actions
+                # if we did augmentation before then we don't need to augment again
+                if not self.symmetry["use_data_augmentation"]:
+                    data_augmentation_func = self.symmetry["data_augmentation_func"]
+                    obs_batch, _ = data_augmentation_func(obs=obs_batch, actions=None, env=self.symmetry["_env"])
+                    # compute number of augmentations per sample
+                    num_aug = int(obs_batch.shape[0] / original_batch_size)
+
+                # actions predicted by the actor for symmetrically-augmented observations
+                mean_actions_batch = self.policy.act_inference(obs_batch.detach().clone())
+
+                # compute the symmetrically augmented actions
+                # note: we are assuming the first augmentation is the original one.
+                #   We do not use the action_batch from earlier since that action was sampled from the distribution.
+                #   However, the symmetry loss is computed using the mean of the distribution.
+                action_mean_orig = mean_actions_batch[:original_batch_size]
+                _, actions_mean_symm_batch = data_augmentation_func(
+                    obs=None, actions=action_mean_orig, env=self.symmetry["_env"]
+                )
+
+                # compute the loss (we skip the first augmentation as it is the original one)
+                mse_loss = torch.nn.MSELoss()
+                symmetry_loss = mse_loss(
+                    mean_actions_batch[original_batch_size:], actions_mean_symm_batch.detach()[original_batch_size:]
+                )
+                # add the loss to the total loss
+                if self.symmetry["use_mirror_loss"]:
+                    loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
+                else:
+                    symmetry_loss = symmetry_loss.detach()
+
+            # Random Network Distillation loss
+            # TODO: Move this processing to inside RND module.
+            if self.rnd:
+                # extract the rnd_state
+                # TODO: Check if we still need torch no grad. It is just an affine transformation.
+                with torch.no_grad():
+                    rnd_state_batch = self.rnd.get_rnd_state(obs_batch[:original_batch_size])
+                    rnd_state_batch = self.rnd.state_normalizer(rnd_state_batch)
+                # predict the embedding and the target
+                predicted_embedding = self.rnd.predictor(rnd_state_batch)
+                target_embedding = self.rnd.target(rnd_state_batch).detach()
+                # compute the loss as the mean squared error
+                mseloss = torch.nn.MSELoss()
+                rnd_loss = mseloss(predicted_embedding, target_embedding)
+
+            # Compute the gradients
+            # -- For PPO
+            self.optimizer.zero_grad()
+            loss.backward()
+            # -- For RND
+            if self.rnd:
+                self.rnd_optimizer.zero_grad()  # type: ignore
+                rnd_loss.backward()
+
+            # Collect gradients from all GPUs
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+
+            # Apply the gradients
+            # -- For PPO (now excludes HIM estimator)
+            nn.utils.clip_grad_norm_(
+                [p for n, p in self.policy.named_parameters() if not n.startswith("him_estimator.")], self.max_grad_norm
+            )
+            self.optimizer.step()
+            # -- For RND
+            if self.rnd_optimizer:
+                self.rnd_optimizer.step()
+
+            # Store the losses
+            # -- PPO loss
+            mean_value_loss += value_loss.item()
+            mean_surrogate_loss += surrogate_loss.item()
+            mean_entropy += entropy_batch.mean().item()
+            # -- AMP loss
+            mean_discriminator_loss += discriminator_loss.item()
+            mean_policy_pred += policy_d.mean().item()
+            mean_expert_pred += expert_d.mean().item()
+            # -- RND loss
+            if mean_rnd_loss is not None:
+                mean_rnd_loss += rnd_loss.item()
+            # -- Symmetry loss
+            if mean_symmetry_loss is not None:
+                mean_symmetry_loss += symmetry_loss.item()
+
+        # -- For PPO
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_value_loss /= num_updates
+        mean_surrogate_loss /= num_updates
+        mean_entropy /= num_updates
+        # -- For RND
+        if mean_rnd_loss is not None:
+            mean_rnd_loss /= num_updates
+        # -- For Symmetry
+        if mean_symmetry_loss is not None:
+            mean_symmetry_loss /= num_updates
+        # -- For AMP
+        mean_discriminator_loss /= num_updates
+        mean_policy_pred /= num_updates
+        mean_expert_pred /= num_updates
+
+        # -- Clear the storage
+        self.storage.clear()
+
+        # construct the loss dictionary
+        loss_dict = {
+            "value_function": mean_value_loss,
+            "surrogate": mean_surrogate_loss,
+            "entropy": mean_entropy,
+            "amp_loss": mean_discriminator_loss,
+            "expert_pred": mean_expert_pred,
+            "policy_pred": mean_policy_pred,
+        }
+        if self.rnd:
+            loss_dict["rnd"] = mean_rnd_loss
+        if self.symmetry:
+            loss_dict["symmetry"] = mean_symmetry_loss
+
+        return loss_dict

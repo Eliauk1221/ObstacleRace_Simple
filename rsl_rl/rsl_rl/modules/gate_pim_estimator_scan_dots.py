@@ -1,0 +1,198 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+
+class GatePIMEstimatorScanDots(nn.Module):
+    def __init__(self,
+                 temporal_steps,
+                 num_one_step_obs,
+                 num_one_step_priveleged_obs,
+                 enc_hidden_dims=[256, 128, 64],
+                 tar_hidden_dims=[256, 128],
+                 learning_rate=1e-3,
+                 max_grad_norm=10.0,
+                 num_prototype=64,
+                 temperature=3.0,
+                 gate_load_balance_coef=0.1,
+                 gate_entropy_eps=1e-8,
+                 **kwargs):
+        if kwargs:
+            print("Estimator_CL.__init__ got unexpected arguments, which will be ignored: " + str(
+                [key for key in kwargs.keys()]))
+        super(GatePIMEstimatorScanDots, self).__init__()
+        activation = nn.ELU()
+
+        self.temporal_steps = temporal_steps
+        self.num_one_step_obs = num_one_step_obs
+        self.num_one_step_priveleged_obs = num_one_step_priveleged_obs
+        self.num_latent = enc_hidden_dims[-1]
+        self.max_grad_norm = max_grad_norm
+        self.temperature = temperature
+        # λ_gate in L_gate = -λ_gate * H(p̄); encourages uniform batch-averaged routing.
+        self.gate_load_balance_coef = gate_load_balance_coef
+        self.gate_entropy_eps = gate_entropy_eps
+
+        # Encoder
+        enc_input_dim = self.temporal_steps * self.num_one_step_obs + 16 * 24
+        enc_layers = []
+        for i in range(len(enc_hidden_dims) - 1):
+            enc_layers += [nn.Linear(enc_input_dim, enc_hidden_dims[i]), activation]
+            enc_input_dim = enc_hidden_dims[i]
+        enc_layers += [nn.Linear(enc_input_dim, enc_hidden_dims[-1] + 3 + 4)]
+        self.encoder = nn.Sequential(*enc_layers)
+
+        # Target
+        tar_input_dim = self.num_one_step_obs + 345
+        tar_layers = []
+        for i in range(len(tar_hidden_dims)):
+            tar_layers += [nn.Linear(tar_input_dim, tar_hidden_dims[i]), activation]
+            tar_input_dim = tar_hidden_dims[i]
+        tar_layers += [nn.Linear(tar_input_dim, enc_hidden_dims[-1])]
+        self.target = nn.Sequential(*tar_layers)
+
+        # Gate Target
+        tar_input_dim = self.num_one_step_obs + 345
+        tar_layers = []
+        for i in range(len(tar_hidden_dims)):
+            tar_layers += [nn.Linear(tar_input_dim, tar_hidden_dims[i]), activation]
+            tar_input_dim = tar_hidden_dims[i]
+        tar_layers += [nn.Linear(tar_input_dim, 4)]
+        self.gate_target = nn.Sequential(*tar_layers)
+
+        # Prototype
+        self.proto = nn.Embedding(num_prototype, enc_hidden_dims[-1])
+        self.gate_proto = nn.Embedding(num_prototype, 4)
+
+        # Optimizer
+        self.learning_rate = learning_rate
+        self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
+
+    def forward(self, obs_history, depth):
+        obs = torch.cat([obs_history, depth.view(depth.shape[0], -1)], dim=-1).detach()
+        parts = self.encoder(obs)
+        vel, z, gate = parts[..., :3], parts[..., 3:-4], parts[..., -4:]
+        z = F.normalize(z, dim=-1, p=2.0)
+        gate = F.softmax(gate, dim=-1)
+        return vel.detach(), z.detach(), gate.detach()
+
+    def update(self, obs_history, depth, critic_obs, next_critic_obs, depth_latent, lr=None):
+        if lr is not None:
+            self.learning_rate = lr
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.learning_rate
+
+        obs_history = obs_history.reshape(-1, obs_history.shape[-1])
+        depth = depth.reshape(depth.shape[0], -1)
+        actor_obs = torch.cat([obs_history, depth], dim=-1)
+
+        critic_obs = critic_obs.reshape(-1, critic_obs.shape[-1])
+        next_critic_obs = next_critic_obs.reshape(-1, next_critic_obs.shape[-1])
+
+        vel = critic_obs[..., -self.num_one_step_priveleged_obs + self.num_one_step_obs : -self.num_one_step_priveleged_obs + self.num_one_step_obs + 3].detach()
+        next_obs = next_critic_obs[..., -self.num_one_step_priveleged_obs + 3: -self.num_one_step_priveleged_obs + 3 + self.num_one_step_obs].detach()
+        scan_dots = critic_obs[..., -345:].detach()
+        privitage_obs = torch.cat([next_obs, scan_dots], dim=-1)
+
+        z_s = self.encoder(actor_obs)
+        pred_vel, z_s, z_s_gate = z_s[..., :3], z_s[..., 3:-4], z_s[..., -4:]
+        z_t = self.target(privitage_obs)
+        z_t_gate = self.gate_target(privitage_obs)
+
+        # MoE-style gate load balancing: p_{n,i} = softmax(z)_i, p̄_i = mean_n p_{n,i},
+        # H(p̄) = -sum_i p̄_i log(p̄_i + ε), L_gate = -λ_gate H(p̄).
+        p_bar = F.softmax(z_s_gate, dim=-1).mean(dim=0)
+        H_p_bar = -(p_bar * (p_bar + self.gate_entropy_eps).log()).sum()
+        gate_entropy_loss = -self.gate_load_balance_coef * H_p_bar
+
+        z_s = F.normalize(z_s, dim=-1, p=2.0)
+        z_s_gate = F.normalize(z_s_gate, dim=-1, p=2.0)
+        z_t = F.normalize(z_t, dim=-1, p=2.0)
+        z_t_gate = F.normalize(z_t_gate, dim=-1, p=2.0)
+
+        # prop swap loss
+        with torch.no_grad():
+            w = self.proto.weight.data.clone()
+            w = F.normalize(w, dim=-1, p=2.0)
+            self.proto.weight.copy_(w)
+
+        score_s = z_s @ self.proto.weight.T
+        score_t = z_t @ self.proto.weight.T
+
+        with torch.no_grad():
+            q_s = sinkhorn(score_s)
+            q_t = sinkhorn(score_t)
+
+        log_p_s = F.log_softmax(score_s / self.temperature, dim=-1)
+        log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
+
+        swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
+
+        # gate swap loss
+        with torch.no_grad():
+            w = self.gate_proto.weight.data.clone()
+            w = F.normalize(w, dim=-1, p=2.0)
+            self.gate_proto.weight.copy_(w)
+
+        score_s = z_s_gate @ self.gate_proto.weight.T
+        score_t = z_t_gate @ self.gate_proto.weight.T
+
+        with torch.no_grad():
+            q_s = sinkhorn(score_s)
+            q_t = sinkhorn(score_t)
+
+        log_p_s = F.log_softmax(score_s / self.temperature, dim=-1)
+        log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
+
+        gate_swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
+
+        # estimation loss
+        estimation_loss = F.mse_loss(pred_vel, vel)
+
+        losses = estimation_loss + swap_loss + gate_swap_loss + gate_entropy_loss
+
+        self.optimizer.zero_grad()
+        losses.backward()
+        nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
+        self.optimizer.step()
+
+        return (
+            estimation_loss.item(),
+            swap_loss.item(),
+            gate_swap_loss.item(),
+            H_p_bar.item(),
+        )
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load the parameters of the actor-critic model.
+
+        Args:
+            state_dict (dict): State dictionary of the model.
+            strict (bool): Whether to strictly enforce that the keys in state_dict match the keys returned by this
+                           module's state_dict() function.
+
+        Returns:
+            bool: Whether this training resumes a previous training. This flag is used by the `load()` function of
+                  `OnPolicyRunner` to determine how to load further parameters (relevant for, e.g., distillation).
+        """
+
+        super().load_state_dict(state_dict, strict=strict)
+        return True
+
+
+@torch.no_grad()
+def sinkhorn(out, eps=0.05, iters=3):
+    Q = torch.exp(out / eps).T
+    K, B = Q.shape[0], Q.shape[1]
+    Q /= Q.sum()
+
+    for it in range(iters):
+        # normalize each row: total weight per prototype must be 1/K
+        Q /= torch.sum(Q, dim=1, keepdim=True)
+        Q /= K
+
+        # normalize each column: total weight per sample must be 1/B
+        Q /= torch.sum(Q, dim=0, keepdim=True)
+        Q /= B
+    return (Q * B).T
