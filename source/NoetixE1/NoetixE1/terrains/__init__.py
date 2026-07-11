@@ -7,7 +7,10 @@ from isaaclab.terrains import *
 from .terrain_generator_cfg import *
 from .custom_terrain import (
     HfDoubleFramePlatformTerrainCfg,
+    HfFigure8BridgeTerrainCfg,
+    HfFigure8SCurveBridgeTerrainCfg,
     HfHurdleTerrainCfg,
+    HfInterlacedCorridorWedgesTerrainCfg,
     HfMultiGapTerrainCfg,
     HfSingleGapTerrainCfg,
     HfNoisyInvertedPyramidSlopedTerrainCfg,

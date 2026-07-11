@@ -22,7 +22,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 from NoetixE1.assets import ASSET_DIR
-from NoetixE1.terrains import DEPTH_TERRAINS_CFG, GreedyconcatEdgeCylinderCfg, TerrainImporterCfg, DEPTH_TERRAINS_CFG2, DEPTH_TERRAINS_CFG3, DEPTH_TERRAINS_CFG4, DEPTH_TERRAINS_CFG5
+from NoetixE1.terrains import DEPTH_TERRAINS_CFG6, GreedyconcatEdgeCylinderCfg, TerrainImporterCfg, DEPTH_TERRAINS_CFG2, DEPTH_TERRAINS_CFG3, DEPTH_TERRAINS_CFG4, DEPTH_TERRAINS_CFG5
 
 from . import mdp
 
@@ -46,7 +46,7 @@ class E1SceneCfg(InteractiveSceneCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",  # plane generator
-        terrain_generator=DEPTH_TERRAINS_CFG,
+        terrain_generator=DEPTH_TERRAINS_CFG6,
         max_init_terrain_level=1,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
@@ -251,6 +251,18 @@ class CommandsCfg:
                 lin_vel_y=(0.0, 0.0),
                 ang_vel_z=(-1.0, 1.0),  # yaw角速度范围限制在 -0.5 到 0.5
                 zero_prob=[0.5, 0.9, 0.5]  # zero概率：[x, y, yaw]
+            ),
+            "interlaced_corridor_wedges": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.3, 1.5),
+                lin_vel_y=(-0.2, 0.2),
+                ang_vel_z=(-0.5, 0.5),
+                zero_prob=[0.5, 0.9, 0.5],
+            ),
+            "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.0, 2.5),
+                lin_vel_y=(0.0, 0.5),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.5, 0.9, 0.5],
             ),
         },
     )
@@ -558,6 +570,7 @@ class EventCfg:
                 "cross_stepping_stones2": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "cross_stepping_stones1": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "beam": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
+                "interlaced_corridor_wedges": (-0.5235987755982988, 0.5235987755982988),
             },
             "terrain_specific_pos_range": {
                 "cross_stepping_stones3": {
@@ -576,6 +589,13 @@ class EventCfg:
                     "x": (-0.1, 0.1),  # 在十字梅花桩地形上，x 范围限制在 -0.3 到 0.3
                     "y": (-0.1, 0.1),  # y 范围限制在 -0.3 到 0.3
                 },
+                "interlaced_corridor_wedges": {
+                    "x": (-4.0, -3.2),
+                    "y": (-0.75, -0.25),
+                },
+            },
+            "terrain_specific_spawn_z_offset": {
+                "interlaced_corridor_wedges": -0.6,
             },
         },
     )
@@ -673,6 +693,14 @@ class EventCfg:
                     "pitch": (-0.78, 0.78),
                     "yaw": (-0.78, 0.78),
                 },
+                "interlaced_corridor_wedges": {
+                    "x": (-0.8, 0.8),
+                    "y": (-0.8, 0.8),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
+                    "yaw": (-0.5, 0.5),
+                },
             },
         },
     )
@@ -684,10 +712,76 @@ class RewardsCfg:
 
     # ------------------------------------------- Tracking Velocity -------------------------------------------
     track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=1.2, params={"std": 0.5})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.0, params={"std": 0.5})
+    track_ang_vel_z_exp = RewTerm(
+        func=mdp.track_ang_vel_z_world_exp,
+        weight=1.0,
+        params={"std": 0.5, "skip_terrain_types": ("figure8_bridge",)},
+    )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
-    delta_yaw = RewTerm(func=mdp.delta_yaw_reward, weight=-0.5)
+    delta_yaw = RewTerm(
+        func=mdp.delta_yaw_reward_terrain_rescale,
+        weight=-0.5,
+        params={"terrain_types": ("figure8_bridge",), "scale_on_terrain": 0.0},
+    )
     lin_vel_dir_reward = RewTerm(func=mdp.lin_vel_dir_reward, weight=-0.5)
+
+    # ------------------------------------------- figure8_bridge -------------------------------------------
+    figure8_commanded_idle = RewTerm(
+        func=mdp.figure8_bridge_commanded_idle_penalty,
+        weight=-1.0,
+        params={
+            "terrain_types": ("figure8_bridge",),
+            "min_cmd_speed": 0.15,
+            "min_body_speed": 0.08,
+        },
+    )
+    figure8_lateral_offset = RewTerm(
+        func=mdp.figure8_bridge_lateral_offset_penalty,
+        weight=-1.0,
+        params={
+            "terrain_types": ("figure8_bridge",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "bridge_height": 0.1,
+            "bridge_tol": 0.04,
+            "edge_buffer_m": 0.05,
+        },
+    )
+    figure8_feet_impact = RewTerm(
+        func=mdp.feet_impact,
+        weight=-10.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "terrain_types": ("figure8_bridge",),
+        },
+    )
+
+    corridor_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=0.5,
+        params={
+            "std": 0.2,
+            "terrain_types": ("interlaced_corridor_wedges",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-3.0, 3.0),
+        },
+    )
+    interlaced_ramp_step_up_lift = RewTerm(
+        func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
+        weight=6,
+        params={
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "offset": 0.06,
+            "clearance_threshold": 0.15,
+            "std": 0.05,
+            "x_range": (-3.4, -2.8),
+            "min_forward_command": 0.3,
+            "terrain_types": ("interlaced_corridor_wedges",),
+        },
+    )
     # ------------------------------------------------- Base --------------------------------------------------
     flat_orientation_exp = RewTerm(func=mdp.flat_orientation_exp, weight=0.5, params={"std": 0.5})
     # ------------------------------------------------- Feet --------------------------------------------------
@@ -707,7 +801,10 @@ class RewardsCfg:
     feet_impact = RewTerm(
         func=mdp.feet_impact,
         weight=-3.,
-        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link")},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "skip_terrain_types": ("figure8_bridge",),
+        },
     )
     feet_air_time = RewTerm(
         func=mdp.feet_air_time_positive_biped,
@@ -727,7 +824,9 @@ class RewardsCfg:
             "terrain_types": (
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
-                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1"),
+                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
+                "interlaced_corridor_wedges",
+            ),
         },
     )
 
@@ -739,7 +838,9 @@ class RewardsCfg:
             "terrain_types": (
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
-                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1"),
+                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
+                "interlaced_corridor_wedges",
+            ),
         },
     )
 
@@ -785,7 +886,9 @@ class RewardsCfg:
             "terrain_types": (
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
-                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1"),
+                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
+                "interlaced_corridor_wedges",
+            ),
         },
     )
 
@@ -902,6 +1005,15 @@ class TerminationsCfg:
                 "gap",
             ]
         }
+    )
+    figure8_bridge_fall_off = DoneTerm(
+        func=mdp.figure8_bridge_fall_off,
+        params={
+            "terrain_types": ["figure8_bridge"],
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "contact_force_threshold": 0.5,
+            "root_drop_threshold_m": 0.06,
+        },
     )
     # (5) Out of Bounds
     terrain_out_of_bounds = DoneTerm(func=mdp.terrain_out_of_bounds, time_out=True, params={"distance_buffer": 2.0})

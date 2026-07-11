@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
@@ -77,12 +78,20 @@ def track_lin_vel_xy_yaw_frame_exp_terrain_full(
 
 
 def track_ang_vel_z_world_exp(
-    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    std: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
+    """Track yaw rate command. On ``skip_terrain_types`` terrains return 1.0 so the policy may turn freely."""
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command("base_velocity")
     ang_vel_error = torch.square(command[:, 2] - asset.data.root_ang_vel_w[:, 2])
-    return torch.exp(-ang_vel_error / std**2)
+    reward = torch.exp(-ang_vel_error / std**2)
+    if skip_terrain_types:
+        on_terrain = _terrain_type_mask(env, skip_terrain_types, reward.device)
+        reward = torch.where(on_terrain, torch.ones_like(reward), reward)
+    return reward
 
 
 def flat_orientation_exp(
@@ -182,14 +191,26 @@ def feet_stumble(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Te
         dim=1,
     )
 
-def feet_impact(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    # 足部的碰撞力
+def feet_impact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    terrain_types: tuple[str, ...] | None = None,
+    skip_terrain_types: tuple[str, ...] | None = None,
+) -> torch.Tensor:
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     feet_contact = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :]
-    horizontal_force = torch.norm(feet_contact[:, :,:2], dim=-1)
+    horizontal_force = torch.norm(feet_contact[:, :, :2], dim=-1)
     vertical_force = torch.abs(feet_contact[:, :, 2])
     impact = horizontal_force > 0.5 * vertical_force
-    return torch.any(impact, dim=1)
+    result = torch.any(impact, dim=1)
+    device = result.device
+    if skip_terrain_types:
+        on_skip = _terrain_type_mask(env, skip_terrain_types, device)
+        result = torch.where(on_skip, torch.zeros_like(result), result)
+    if terrain_types:
+        on_terrain = _terrain_type_mask(env, terrain_types, device)
+        result = result & on_terrain
+    return result
 
 
 def feet_force(
@@ -415,6 +436,21 @@ def delta_yaw_reward(
     absolute_command = torch.abs(command_speed_yaw)
     punish = delta_speed * (delta_speed > 0.1) * (delta_speed > 0.5 * absolute_command)
     return punish
+
+
+def delta_yaw_reward_terrain_rescale(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    scale_on_terrain: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """``delta_yaw_reward``，在指定子地形上将惩罚乘以 ``scale_on_terrain``（0 即关闭）。"""
+    punish = delta_yaw_reward(env, asset_cfg)
+    if not terrain_types:
+        return punish
+    mask = _terrain_type_mask(env, terrain_types, env.device)
+    scale = torch.where(mask, torch.full_like(punish, float(scale_on_terrain)), torch.ones_like(punish))
+    return punish * scale
 
 
 def delta_yaw_penalty_exp(
@@ -648,3 +684,549 @@ def volume_points_penetration(
         punish = punish * is_desired_terrain.float()
 
     return punish
+
+
+def corridor_centerline_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward staying near the corridor centerline (local y=0) on named terrains.
+
+    Uses terrain-cell coordinates: ``local_xy = root_pos_w.xy - env_origins.xy``.
+    Active when forward velocity command exceeds ``min_forward_command``.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    local_y = local_xy[:, 1]
+    reward = torch.exp(-torch.square(local_y) / (std**2))
+
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        is_desired_terrain = _check_terrain_types_from_positions(env, asset.data.root_pos_w, terrain_types)
+    else:
+        is_desired_terrain = _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = is_desired_terrain & (cmd_x > min_forward_command)
+
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        local_x = local_xy[:, 0]
+        active = active & (local_x >= x_lo) & (local_x <= x_hi)
+
+    return reward * active.float()
+
+
+def interlaced_corridor_ramp_step_up_lift_reward(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    offset: float = 0.06,
+    clearance_threshold: float = 0.15,
+    std: float = 0.05,
+    x_range: tuple[float, float] = (-3.4, -2.8),
+    min_forward_command: float = 0.3,
+    terrain_types: tuple[str, ...] = ("interlaced_corridor_wedges",),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Encourage stepping up by rewarding elevated (swing) feet near the ramp entry.
+
+    Uses left/right foot height scanners to estimate foot clearance above the local ground under each scanner.
+    Reward is active only when:
+    - robot is on desired terrain types
+    - forward command is non-zero (cmd_x > min_forward_command)
+    - local_x is within x_range (near the ramp ledge)
+    - the corresponding foot is not in contact (swing foot)
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # Terrain mask
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        is_desired_terrain = _check_terrain_types_from_positions(env, asset.data.root_pos_w, terrain_types)
+    else:
+        is_desired_terrain = _check_terrain_types_from_positions(
+            env, None, terrain_types, col_indices=col_indices
+        )
+
+    # local_x in terrain-cell frame
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    local_x = local_xy[:, 0]
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    x_lo, x_hi = x_range
+    active = is_desired_terrain & (cmd_x > min_forward_command) & (local_x >= x_lo) & (local_x <= x_hi)
+
+    # Foot contact -> swing mask
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = torch.max(
+        torch.norm(net_contact_forces[:, :, contact_sensor_cfg.body_ids, :], dim=-1),
+        dim=1,
+    )[0] > 0.5  # (num_envs, 2)
+
+    left_air = (~feet_contact[:, 0]).float()
+    right_air = (~feet_contact[:, 1]).float()
+
+    # Clearance estimation under each foot scanner
+    left_scanner: RayCaster = env.scene.sensors[left_foot_height_scanner_cfg.name]
+    right_scanner: RayCaster = env.scene.sensors[right_foot_height_scanner_cfg.name]
+
+    # pos_w[:,2] is the scanner origin height; ray_hits_w[...,2] are ground intersections.
+    # Positive (pos_z - hit_z - offset) means the scanner is above the local ground under it.
+    left_clearance = (
+        left_scanner.data.pos_w[:, 2].unsqueeze(1) - left_scanner.data.ray_hits_w[..., 2] - offset
+    )
+    right_clearance = (
+        right_scanner.data.pos_w[:, 2].unsqueeze(1) - right_scanner.data.ray_hits_w[..., 2] - offset
+    )
+
+    # Convert clearance tensor to a single value per env.
+    # We first mean over points (-1), then over rays (-1).
+    left_clear = left_clearance.clamp(min=0.0).mean(dim=-1).mean(dim=-1)
+    right_clear = right_clearance.clamp(min=0.0).mean(dim=-1).mean(dim=-1)
+
+    # Reward when clearance is above threshold (bounded in [0,1]).
+    left_r = left_air * torch.sigmoid((left_clear - clearance_threshold) / max(std, 1e-6))
+    right_r = right_air * torch.sigmoid((right_clear - clearance_threshold) / max(std, 1e-6))
+
+    return torch.max(left_r, right_r) * active.float()
+
+def _terrain_type_mask(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    """Boolean mask (num_envs,) for envs on named terrain types."""
+    if not terrain_types:
+        return torch.ones(env.num_envs, dtype=torch.bool, device=device)
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        asset: Articulation = env.scene["robot"]
+        return _check_terrain_types_from_positions(env, asset.data.root_link_pos_w, terrain_types)
+    return _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+
+def _get_figure8_polyline(
+    env: ManagerBasedRLEnv,
+    inner_radius_m: float,
+    bridge_width_m: float,
+    samples_per_loop: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """缓存双圆 8 字中心线；返回 ``(t_samples[S], pts[S,2])``。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import centerline_points_torch
+
+    cache_key = "_figure8_polyline_cache"
+    cache = getattr(env.unwrapped, cache_key, None)
+    key = (float(inner_radius_m), float(bridge_width_m), int(samples_per_loop), str(device))
+    if cache is None or cache.get("key") != key:
+        from NoetixE1.terrains.custom_terrain.figure8_geometry import _circle_angles
+
+        pts = centerline_points_torch(inner_radius_m, bridge_width_m, samples_per_loop, device)
+        t_samples = _circle_angles(pts.shape[0], device)
+        cache = {"key": key, "t_samples": t_samples, "pts": pts}
+        setattr(env.unwrapped, cache_key, cache)
+    return cache["t_samples"], cache["pts"]
+
+
+def _xy_to_path_tangent_lateral(
+    xy: torch.Tensor, t_samples: torch.Tensor, pts: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """点到闭合中心线最近点：路径参数 ``t``、切向单位向量、横向距离（米）。"""
+    num_envs = xy.shape[0]
+    num_segs = pts.shape[0]
+    a = pts
+    b = torch.roll(pts, shifts=-1, dims=0)
+    ab = b - a
+    ab2 = torch.clamp((ab * ab).sum(dim=1), min=1e-12)
+
+    ap = xy[:, None, :] - a[None, :, :]
+    seg_t = torch.clamp((ap * ab[None, :, :]).sum(dim=2) / ab2[None, :], 0.0, 1.0)
+    closest = a[None, :, :] + seg_t[:, :, None] * ab[None, :, :]
+    diff = xy[:, None, :] - closest
+    dist2 = (diff * diff).sum(dim=2)
+    seg_idx = dist2.argmin(dim=1)
+
+    idx = torch.arange(num_envs, device=xy.device)
+    t0 = t_samples[seg_idx]
+    t1 = t_samples[(seg_idx + 1) % num_segs]
+    dt_seg = t1 - t0
+    dt_seg = torch.where(dt_seg < 0.0, dt_seg + 2.0 * math.pi, dt_seg)
+    t_param = t0 + seg_t[idx, seg_idx] * dt_seg
+
+    tangent = ab[seg_idx]
+    tangent = tangent / (torch.norm(tangent, dim=1, keepdim=True).clamp(min=1e-8))
+    lateral = torch.sqrt(dist2.min(dim=1).values)
+    return t_param, tangent, lateral
+
+
+def _figure8_bridge_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, torch.Tensor]:
+    """从运行时子地形 cfg 读取 figure8_bridge 的内缘半径与逐 env 桥宽（与 terrain 生成一致）。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import bridge_width_for_terrain_levels
+
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get("figure8_bridge")
+    if sub is None:
+        raise KeyError("figure8_bridge sub_terrain not found in terrain_generator.sub_terrains")
+
+    inner_r = float(sub.inner_radius_m)
+    widths = tuple(getattr(sub, "bridge_width_by_level", ()) or ())
+    if len(widths) == 0:
+        raise ValueError("figure8_bridge bridge_width_by_level must not be empty")
+
+    num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+    bridge_width_m = bridge_width_for_terrain_levels(env.scene.terrain.terrain_levels, num_rows, widths)
+    return inner_r, bridge_width_m
+
+
+def _figure8_foot_perception(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    contact_force_threshold: float,
+    bridge_height: float,
+    bridge_tol: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """脚底射线位置 + 接触：返回左右脚 on_bridge、both_on_bridge、foot_center_xy、feet_contact_any。
+
+    注意：这里的“在桥上”使用 XY 环带几何（与 ``figure8_bridge_terrain`` 一致），
+    避免仅用射线高度（bridge_height/tol）在软边/量化下导致 both_on 长期为 False。
+    """
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import foot_xy_on_bridge_annulus_torch
+
+    device = env.device
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(torch.norm(net_contact_forces[:, :, contact_sensor_cfg.body_ids, :], dim=-1), dim=1)[0]
+        > contact_force_threshold
+    )
+
+    origins_xy = env.scene.env_origins[:, :2]
+    left_scanner: RayCaster = env.scene.sensors[left_foot_height_scanner_cfg.name]
+    right_scanner: RayCaster = env.scene.sensors[right_foot_height_scanner_cfg.name]
+
+    left_xy = left_scanner.data.pos_w[:, :2] - origins_xy
+    right_xy = right_scanner.data.pos_w[:, :2] - origins_xy
+    foot_center_xy = 0.5 * (left_xy + right_xy)
+    inner_r, bridge_width_m = _figure8_bridge_geometry_per_env(env)
+    left_on = foot_xy_on_bridge_annulus_torch(left_xy, inner_r, bridge_width_m)
+    right_on = foot_xy_on_bridge_annulus_torch(right_xy, inner_r, bridge_width_m)
+    both_on_bridge = left_on & right_on
+    return left_on, right_on, both_on_bridge, foot_center_xy, feet_contact
+
+
+def figure8_bridge_commanded_idle_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    min_cmd_speed: float = 0.15,
+    min_body_speed: float = 0.08,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """有前进指令但机身几乎不动时惩罚（防在 8 字桥上蹲着刷分）。
+
+    全局 ``low_speed_reward`` 主要奖励跟速；该项为 8 字专用、仅在有指令且速度过低时给正惩罚量。
+    """
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command("base_velocity")
+    cmd_speed = torch.norm(command[:, :2], dim=1)
+    vel_yaw = math_utils.quat_apply_inverse(
+        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+    )
+    body_speed = torch.norm(vel_yaw[:, :2], dim=1)
+    idle = (cmd_speed > float(min_cmd_speed)) & (body_speed < float(min_body_speed))
+    return idle.float() * mask.float()
+
+
+def figure8_bridge_on_bridge_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    contact_force_threshold: float = 0.5,
+    bridge_height: float = 0.1,
+    bridge_tol: float = 0.04,
+) -> torch.Tensor:
+    """8 字桥：双脚均在桥面（脚底射线）时 1，单脚在桥上 0.5，否则 0。"""
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    left_on, right_on, both_on, _, feet_contact_lr = _figure8_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+        bridge_height,
+        bridge_tol,
+    )
+    any_contact = feet_contact_lr.any(dim=1)
+    any_on = (left_on | right_on) & any_contact
+    one_foot = any_on & ~both_on
+    reward = torch.zeros(env.num_envs, device=device)
+    reward = torch.where(both_on & any_contact, torch.ones_like(reward), reward)
+    reward = torch.where(one_foot, torch.full_like(reward, 0.5), reward)
+    return reward * mask.float()
+
+
+def figure8_bridge_unsafe_foot_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    contact_force_threshold: float = 0.5,
+    bridge_height: float = 0.1,
+    bridge_tol: float = 0.04,
+) -> torch.Tensor:
+    """8 字桥：任一脚有接触且脚底射线不在桥面 → 1。"""
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    left_on, right_on, _, _, feet_contact_lr = _figure8_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+        bridge_height,
+        bridge_tol,
+    )
+    left_unsafe = feet_contact_lr[:, 0] & ~left_on
+    right_unsafe = feet_contact_lr[:, 1] & ~right_on
+    unsafe = left_unsafe | right_unsafe
+    return unsafe.float() * mask.float()
+
+
+def figure8_bridge_path_forward_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    inner_radius_m: float = 2.5,
+    bridge_width_m: float = 0.5,
+    samples_per_loop: int = 256,
+    std: float = 0.25,
+    min_cmd_speed: float = 0.1,
+    contact_force_threshold: float = 0.5,
+    bridge_height: float = 0.1,
+    bridge_tol: float = 0.04,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """沿 8 字中心线切向速度奖励（主）；切向/横向几何由脚底中心 XY 估计，仅在双脚感知在桥上生效。"""
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    _, _, both_on, foot_xy, _ = _figure8_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+        bridge_height,
+        bridge_tol,
+    )
+    t_samples, pts = _get_figure8_polyline(env, inner_radius_m, bridge_width_m, samples_per_loop, device)
+    _, tangent, _ = _xy_to_path_tangent_lateral(foot_xy, t_samples, pts)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    vel_w = asset.data.root_lin_vel_w[:, :2]
+    v_along = (vel_w * tangent).sum(dim=1)
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_speed = torch.norm(command[:, :2], dim=1)
+    has_cmd = cmd_speed > min_cmd_speed
+    err = torch.square(v_along - cmd_speed)
+    reward = torch.exp(-err / (std**2))
+    reward = reward * both_on.float() * has_cmd.float() * mask.float()
+    return reward
+
+
+def figure8_bridge_lateral_offset_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    edge_buffer_m: float = 0.05,
+    contact_force_threshold: float = 0.5,
+    bridge_height: float = 0.1,
+    bridge_tol: float = 0.04,
+) -> torch.Tensor:
+    """8 字桥“虚拟障碍”边缘惩罚：脚越靠近内/外缘越罚。
+
+    逻辑：
+    - 基于 8 字双圆环带几何（与 ``figure8_bridge_terrain`` 一致）；
+    - 对每只脚在其所属圆环带内的“到最近边缘的余量” margin 计算惩罚；
+    - 当 margin < edge_buffer_m 时惩罚随靠近边缘逐渐增大；
+    - 仅在 figure8_bridge 子地形上启用，避免影响其它地形/正常 reset。
+    """
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import centerline_radius_batch
+
+    left_on, right_on, _, _, feet_contact_lr = _figure8_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+        bridge_height,
+        bridge_tol,
+    )
+    active = feet_contact_lr.any(dim=1) & mask
+
+    inner_r, bridge_width_m = _figure8_bridge_geometry_per_env(env)  # bridge_width per-env
+    outer_r = inner_r + bridge_width_m
+    r_c = centerline_radius_batch(inner_r, bridge_width_m)  # (num_envs,)
+
+    origins_xy = env.scene.env_origins[:, :2]
+    left_scanner: RayCaster = env.scene.sensors[left_foot_height_scanner_cfg.name]
+    right_scanner: RayCaster = env.scene.sensors[right_foot_height_scanner_cfg.name]
+    feet_xy = torch.stack(
+        [
+            left_scanner.data.pos_w[:, :2] - origins_xy,
+            right_scanner.data.pos_w[:, :2] - origins_xy,
+        ],
+        dim=1,
+    )  # (num_envs, 2, 2)
+
+    # distances to left/right circle centers
+    d_left = torch.hypot(feet_xy[..., 0] + r_c.unsqueeze(1), feet_xy[..., 1])
+    d_right = torch.hypot(feet_xy[..., 0] - r_c.unsqueeze(1), feet_xy[..., 1])
+
+    # margin to nearest edge within each annulus (only valid if inside that annulus)
+    inner_t = torch.full_like(d_left, float(inner_r))
+    outer_t = outer_r.unsqueeze(1).expand_as(d_left)
+    inside_left = (d_left >= inner_t) & (d_left <= outer_t)
+    inside_right = (d_right >= inner_t) & (d_right <= outer_t)
+    margin_left = torch.minimum(d_left - inner_t, outer_t - d_left)
+    margin_right = torch.minimum(d_right - inner_t, outer_t - d_right)
+
+    # choose the better (larger) margin if a foot is in both rings near the junction
+    margin = torch.where(inside_left, margin_left, torch.full_like(margin_left, -1.0))
+    margin = torch.where(inside_right, torch.maximum(margin, margin_right), margin)
+
+    # normalize penalty in [0,1] when margin in [0, edge_buffer]
+    buf = float(edge_buffer_m)
+    buf = max(buf, 1e-6)
+    near = torch.clamp(buf - margin, min=0.0) / buf
+    per_foot_pen = near * near
+
+    # Only penalize when the corresponding foot is actually on the figure-8 deck (XY annulus).
+    # This prevents large penalty spikes during flight / after falling off.
+    on_any = torch.stack([left_on, right_on], dim=1)
+    per_foot_pen = per_foot_pen * on_any.float()
+
+    penalty = per_foot_pen.sum(dim=1)
+    return penalty * active.float()
+
+
+def _unwrap_path_delta_t(delta_t: torch.Tensor) -> torch.Tensor:
+    """路径参数差归一到 ``[-pi, pi]``。"""
+    two_pi = 2.0 * math.pi
+    delta_t = torch.where(delta_t > math.pi, delta_t - two_pi, delta_t)
+    delta_t = torch.where(delta_t < -math.pi, delta_t + two_pi, delta_t)
+    return delta_t
+
+
+def figure8_bridge_path_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    inner_radius_m: float = 2.5,
+    bridge_width_m: float = 0.5,
+    samples_per_loop: int = 256,
+    min_v_along: float = 0.05,
+    progress_scale: float = 1.0,
+    contact_force_threshold: float = 0.5,
+    bridge_height: float = 0.1,
+    bridge_tol: float = 0.04,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """沿 8 字弧长正向进度：脚底中心路径参数 ``t`` 的前进量（与切向速度同号）。"""
+    device = env.device
+    mask = _terrain_type_mask(env, terrain_types, device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    if not hasattr(env.unwrapped, "figure8_prev_path_t"):
+        env.unwrapped.figure8_prev_path_t = torch.zeros(env.num_envs, device=device)
+        env.unwrapped.figure8_prev_path_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
+        env.unwrapped.figure8_episode_arc_m = torch.zeros(env.num_envs, device=device)
+
+    _, _, both_on, foot_xy, _ = _figure8_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+        bridge_height,
+        bridge_tol,
+    )
+    t_samples, pts = _get_figure8_polyline(env, inner_radius_m, bridge_width_m, samples_per_loop, device)
+    t_now, tangent, _ = _xy_to_path_tangent_lateral(foot_xy, t_samples, pts)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    v_along = (asset.data.root_lin_vel_w[:, :2] * tangent).sum(dim=1)
+
+    prev_t = env.unwrapped.figure8_prev_path_t
+    prev_valid = env.unwrapped.figure8_prev_path_valid
+    reset = env.episode_length_buf == 0
+    prev_t = torch.where(reset, t_now, prev_t)
+    prev_valid = torch.where(reset, torch.zeros_like(prev_valid), prev_valid)
+
+    delta_t = _unwrap_path_delta_t(t_now - prev_t)
+    signed_progress = torch.where(v_along >= 0.0, delta_t, -delta_t)
+    progress = torch.clamp(signed_progress * float(progress_scale), min=0.0)
+    moving = torch.abs(v_along) > min_v_along
+
+    reward = progress * both_on.float() * moving.float() * prev_valid.float() * mask.float()
+
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import centerline_radius_m, path_param_delta_to_arc_m
+
+    r_c = centerline_radius_m(inner_radius_m, bridge_width_m)
+    arc_inc = path_param_delta_to_arc_m(progress, torch.full_like(progress, r_c))
+    arc_inc = arc_inc * both_on.float() * moving.float() * prev_valid.float() * mask.float()
+    episode_arc = env.unwrapped.figure8_episode_arc_m
+    episode_arc = torch.where(reset, torch.zeros_like(episode_arc), episode_arc)
+    env.unwrapped.figure8_episode_arc_m = episode_arc + arc_inc
+
+    env.unwrapped.figure8_prev_path_t = torch.where(mask, t_now, prev_t)
+    env.unwrapped.figure8_prev_path_valid = torch.where(
+        mask, torch.ones_like(prev_valid) | reset, prev_valid
+    )
+    return reward

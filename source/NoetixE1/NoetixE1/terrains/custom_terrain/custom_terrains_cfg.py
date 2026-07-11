@@ -359,3 +359,121 @@ class HfDoubleFramePlatformTerrainCfg(HfTerrainBaseCfg):
     height_range_2: tuple[float, float] = (0.15, 0.4)
     width_range_2: tuple[float, float] = (0.2, 0.6)
     distance_range_2: tuple[float, float] = (0.5, 1.0)
+
+
+@configclass
+class HfInterlacedCorridorWedgesTerrainCfg(HfTerrainBaseCfg):
+    """沿 ``+x`` 的连续交叉斜坡：所有段横向边界统一为 ``y=±corridor_half_width_m``（默认 ±1.5，宽 3 m），
+    奇偶段坡向交替（之字）。
+
+    默认 4 段 × 1.5 m → 总长 6 m，坡度 15°。
+    """
+
+    function = custom_terrains.interlaced_corridor_wedges_terrain
+
+    corridor_half_width_m: float = 1.5
+    """走廊半宽（米）：每段 ``y_lo=-corridor_half_width_m``、``y_hi=+corridor_half_width_m``。"""
+
+    segment_length_m: float = 1.5
+    """沿 ``+x`` 每段三棱柱长度（米）。"""
+
+    num_segments: int = 4
+    """交叉坡段数；总长度 ``num_segments * segment_length_m``（默认 6 m）。"""
+
+    slope_angle_range: tuple[float, float] = (15.0, 15.0)
+    """坡面仰角（度）；``(15, 15)`` 为固定 15°，也可设课程区间。"""
+
+    edge_blend_m: float = 0.02
+    """横向棱边软过渡（米）；越小越利。"""
+
+    longitudinal_blend_m: float | None = None
+    """图案整体首尾沿 ``x`` 的 fade 宽度（米）；``None`` 表示与 ``edge_blend_m`` 相同。"""
+
+    pattern_origin_x_m: float = -3.0
+    """图案起点（米）：第 0 段从 ``pattern_origin_x_m`` 起，覆盖 ``num_segments * segment_length_m``。"""
+
+    corridor_edge_fade_m: float = 0.06
+    """在 ``|y| > corridor_half_width_m`` 外按此宽度将高度收到 0。"""
+
+@configclass
+class HfFigure8BridgeTerrainCfg(HfTerrainBaseCfg):
+    """平面闭合 8 字桥：两圆于原点相切，圆环桥面 + 坑底。
+
+    默认内缘半径 2.5 m、桥宽 0.5 m → 中心线半径 2.75 m，外缘 3.0 m；
+    圆心 ``(±2.75, 0)``，建议场地 ``size >= (12, 12)`` m。
+    """
+
+    function = custom_terrains.figure8_bridge_terrain
+
+    size: tuple[float, float] = (12.0, 12.0)
+    """单格场地边长（米）；双圆外廓约 11.5 m，需大于默认 8×8。"""
+
+    inner_radius_m: float = 2.5
+    """桥面**内缘**相对圆心的半径（米）；中心线在其外缘再外扩 ``bridge_width/2``。"""
+
+    bridge_height: float = 0.1
+    """桥面顶面高度（米）。"""
+
+    bridge_width_range: tuple[float, float] = (0.8, 0.45)
+    """兼容旧逻辑：未设置 ``bridge_width_by_level`` 时在 ``[0]`` 与 ``[1]`` 间线性插值。"""
+
+    bridge_width_by_level: tuple[float, ...] = (0.8, 0.7, 0.6, 0.5, 0.45)
+    """离散等级桥宽（米）：level 0→0.8 … level 4→0.45；由 difficulty 映射到索引。"""
+
+    holes_depth: tuple[float, float] = (-0.3, -0.5)
+    """坑底深度（米，负值）；随 difficulty 插值。"""
+
+    radial_edge_fade_m: float = 0.03
+    """桥面内外缘软过渡宽度（米）。"""
+
+    samples_per_loop: int = 256
+    """每条圆环中心线弧长采样数（供 MDP 路径几何缓存）。"""
+
+    center_cutout_width_m: float = 0.0
+    """原点矩形挖空宽度（米，沿 x）；0 表示关闭。挖空区高度为坑底 ``holes_depth``。"""
+
+    center_cutout_length_m: float = 0.0
+    """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
+
+
+@configclass
+class HfFigure8SCurveBridgeTerrainCfg(HfTerrainBaseCfg):
+    """半 8 字 → S 形开口桥：在 :class:`HfFigure8BridgeTerrainCfg` 的双圆环带基础上，仅保留一半环带形成 S 形通道。
+
+    约定（env 局部系，原点为几何中心）：
+    - 左圆心 ``(-r_c, 0)``：保留 **上半环带**（``y >= 0``）
+    - 右圆心 ``(+r_c, 0)``：保留 **下半环带**（``y <= 0``）
+    - 其余逻辑（坑底、桥面高度、桥宽难度映射、软边）与 figure8_bridge 保持一致
+    """
+
+    function = custom_terrains.figure8_s_curve_bridge_terrain
+
+    size: tuple[float, float] = (12.0, 12.0)
+    """单格场地边长（米）。"""
+
+    inner_radius_m: float = 2.5
+    """桥面内缘相对圆心的半径（米）。"""
+
+    bridge_height: float = 0.1
+    """桥面顶面高度（米）。"""
+
+    bridge_width_range: tuple[float, float] = (0.8, 0.45)
+    """兼容旧逻辑：未设置 ``bridge_width_by_level`` 时在 ``[0]`` 与 ``[1]`` 间线性插值。"""
+
+    bridge_width_by_level: tuple[float, ...] = (0.8, 0.7, 0.6, 0.5, 0.45)
+    """离散等级桥宽（米）：由 difficulty 映射到索引。"""
+
+    holes_depth: tuple[float, float] = (-0.3, -0.5)
+    """坑底深度（米，负值）；随 difficulty 插值。"""
+
+    radial_edge_fade_m: float = 0.03
+    """桥面内外缘软过渡宽度（米）。"""
+
+    samples_per_loop: int = 256
+    """中心线采样数（与 figure8 保持同默认，便于复用奖励/调参习惯）。"""
+
+    center_cutout_width_m: float = 0.0
+    """原点矩形挖空宽度（米，沿 x）；0 表示关闭。"""
+
+    center_cutout_length_m: float = 0.0
+    """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""

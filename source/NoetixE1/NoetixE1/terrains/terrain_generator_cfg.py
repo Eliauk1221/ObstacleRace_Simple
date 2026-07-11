@@ -40,6 +40,8 @@ from .custom_terrain import (
     HfFramePlatformTerrainCfg,
     HfDoubleFramePlatformTerrainCfg,
     HfSingleGapTerrainCfg,
+    HfInterlacedCorridorWedgesTerrainCfg,
+    HfFigure8BridgeTerrainCfg,
 )
 from .trimesh import ExternalMeshFromMetadataTerrainCfg
 
@@ -582,6 +584,104 @@ from .terrain_generator import FiledTerrainGenerator
 @configclass
 class FiledTerrainGeneratorCfg(TerrainGeneratorCfgBase):
     class_type: type = FiledTerrainGenerator
+
+
+from isaaclab.terrains import FlatPatchSamplingCfg
+
+_DEPTH6_FLAT_PATCH_TARGET = {
+    "target": FlatPatchSamplingCfg(
+        num_patches=50,
+        patch_radius=[0.05, 0.10, 0.15, 0.20],
+        max_height_diff=0.05,
+    ),
+}
+
+# DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges + figure8_bridge
+DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
+    curriculum=True,
+    size=(8.0, 8.0),
+    border_width=20.0,
+    num_rows=10,
+    num_cols=10,
+    horizontal_scale=0.05,
+    vertical_scale=0.01,
+    slope_threshold=0.9,
+    seed=42,
+    use_cache=False,
+    sub_terrains={
+        "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
+            proportion=0.1,
+            slope_range=(0.1, 0.4),
+            noise_range=(0.01, 0.03),
+            noise_step=0.01,
+            num_obstacles=0,
+            obstacle_size=(0.2, 0.4),
+            obstacle_height=(0.5, 1.5),
+            platform_width=2.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "noisy_slope_down": HfNoisyInvertedPyramidSlopedTerrainCfg(
+            proportion=0.1,
+            slope_range=(0.15, 0.4),
+            noise_range=(0.01, 0.03),
+            noise_step=0.01,
+            num_obstacles=0,
+            obstacle_size=(0.2, 0.4),
+            obstacle_height=(0.5, 1.5),
+            platform_width=2.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "stairs_up": HfNoisyInvertedPyramidStairsTerrainCfg(
+            proportion=0.1,
+            step_height_range=(0.05, 0.25),
+            step_width_pixels_range=(10, 5),
+            platform_width=2.0,
+            border_width=0.5,
+            noise_range=(0.00, 0.00),
+            noise_step=0.02,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "stairs_down": HfNoisyPyramidStairsTerrainCfg(
+            proportion=0.1,
+            step_height_range=(0.05, 0.25),
+            step_width_pixels_range=(10, 5),
+            platform_width=2.0,
+            border_width=0.5,
+            noise_range=(0.00, 0.00),
+            noise_step=0.02,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "gap": HfMultiGapTerrainCfg(
+            proportion=0.1,
+            gap_width_pixels_range=(3, 10),
+            gap_depth_range=(0.2, 1.0),
+            step_height_range=(0.03, 0.1),
+            platform_width=2.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "interlaced_corridor_wedges": HfInterlacedCorridorWedgesTerrainCfg(
+            proportion=0.1,
+            corridor_half_width_m=1.5,
+            segment_length_m=1.5,
+            num_segments=4,
+            slope_angle_range=(15.0, 15.0),
+            edge_blend_m=0.02,
+            corridor_edge_fade_m=0.06,
+            pattern_origin_x_m=-3.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "figure8_bridge": HfFigure8BridgeTerrainCfg(
+            proportion=0.2,
+            size=(12.0, 12.0),
+            inner_radius_m=2.5,
+            bridge_height=0.1,
+            bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
+            holes_depth=(0, 0),
+            center_cutout_width_m=0.8,
+            center_cutout_length_m=0.8,
+        ),
+    },
+)
 
 
 # 用于 mimic depth：多种子地形（楼梯、梅花桩、gap 等）按占比生成，并可选用 metadata 中的外部 mesh（terrain_id + 难度微调位置/角度）

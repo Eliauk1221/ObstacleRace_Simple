@@ -21,6 +21,186 @@ if TYPE_CHECKING:
 _disturbance_state: dict[str, dict] = {}
 
 
+def _terrain_env_mask(
+    terrain_types_for_envs: torch.Tensor,
+    col_indices: list[int],
+    num_envs: int,
+    device: torch.device,
+) -> torch.Tensor:
+    is_this_terrain = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    for col_idx in col_indices:
+        is_this_terrain = is_this_terrain | (terrain_types_for_envs == col_idx)
+    return is_this_terrain
+
+
+def _sample_figure8_path_spawn_xy_yaw(
+    num_samples: int,
+    device: torch.device,
+    inner_radius_m: float,
+    bridge_width_m: float,
+    path_loop_ranges: list[dict],
+    position_noise: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """在双圆 8 字中心线指定弧段上采样出生点（env 局部坐标）及切向 yaw。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import sample_path_spawn_xy_yaw
+
+    return sample_path_spawn_xy_yaw(
+        num_samples, device, inner_radius_m, bridge_width_m, path_loop_ranges, position_noise
+    )
+
+
+def _apply_figure8_path_spawn_to_rand_samples(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    rand_samples: torch.Tensor,
+    terrain_types_for_envs: torch.Tensor,
+    terrain_type_names_to_col_map: dict[str, list[int]],
+    figure8_spawn_cfg: dict,
+) -> None:
+    """将 figure8 环境在 rand_samples 中的 x, y, yaw 设为桥面上的路径采样点。"""
+    if "figure8_bridge" not in terrain_type_names_to_col_map:
+        return
+    if not figure8_spawn_cfg.get("path_loop_ranges"):
+        return
+
+    col_indices = terrain_type_names_to_col_map["figure8_bridge"]
+    is_f8 = _terrain_env_mask(terrain_types_for_envs, col_indices, len(env_ids), env.device)
+    if not is_f8.any():
+        return
+
+    num_match = int(is_f8.sum().item())
+    x, y, yaw = _sample_figure8_path_spawn_xy_yaw(
+        num_match,
+        env.device,
+        float(figure8_spawn_cfg.get("inner_radius_m", 2.5)),
+        float(figure8_spawn_cfg.get("bridge_width_m", 0.5)),
+        list(figure8_spawn_cfg["path_loop_ranges"]),
+        float(figure8_spawn_cfg.get("position_noise", 0.15)),
+    )
+    rand_samples[is_f8, 0] = x
+    rand_samples[is_f8, 1] = y
+    rand_samples[is_f8, 5] = yaw
+
+
+def _apply_figure8_center_cutout_spawn_to_rand_samples(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    rand_samples: torch.Tensor,
+    terrain_types_for_envs: torch.Tensor,
+    terrain_type_names_to_col_map: dict[str, list[int]],
+    figure8_spawn_cfg: dict,
+) -> None:
+    """figure8 环境：在原点矩形挖空区采样出生点与朝向。"""
+    if "figure8_bridge" not in terrain_type_names_to_col_map:
+        return
+
+    col_indices = terrain_type_names_to_col_map["figure8_bridge"]
+    is_f8 = _terrain_env_mask(terrain_types_for_envs, col_indices, len(env_ids), env.device)
+    if not is_f8.any():
+        return
+
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import sample_center_cutout_spawn_xy_yaw
+
+    num_match = int(is_f8.sum().item())
+    x, y, yaw = sample_center_cutout_spawn_xy_yaw(
+        num_match,
+        env.device,
+        float(figure8_spawn_cfg.get("center_cutout_width_m", 0.8)),
+        float(figure8_spawn_cfg.get("center_cutout_length_m", 0.8)),
+        tuple(figure8_spawn_cfg.get("base_yaw_angles", (1.57, 3.14))),
+        float(figure8_spawn_cfg.get("yaw_jitter_deg", 75.0)),
+        float(figure8_spawn_cfg.get("position_noise", 0.0)),
+    )
+    rand_samples[is_f8, 0] = x
+    rand_samples[is_f8, 1] = y
+    rand_samples[is_f8, 5] = yaw
+
+
+def _apply_figure8_spawn_to_rand_samples(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    rand_samples: torch.Tensor,
+    terrain_types_for_envs: torch.Tensor,
+    terrain_type_names_to_col_map: dict[str, list[int]],
+    figure8_spawn_cfg: dict,
+) -> None:
+    """按 ``spawn_mode`` 在 8 字地形上采样出生点。"""
+    mode = figure8_spawn_cfg.get("spawn_mode", "path")
+    if mode == "center_cutout":
+        _apply_figure8_center_cutout_spawn_to_rand_samples(
+            env, env_ids, rand_samples, terrain_types_for_envs, terrain_type_names_to_col_map, figure8_spawn_cfg
+        )
+    elif figure8_spawn_cfg.get("path_loop_ranges"):
+        _apply_figure8_path_spawn_to_rand_samples(
+            env, env_ids, rand_samples, terrain_types_for_envs, terrain_type_names_to_col_map, figure8_spawn_cfg
+        )
+
+
+def _figure8_spawn_cfg_active(figure8_spawn_cfg: dict | None) -> bool:
+    if figure8_spawn_cfg is None:
+        return False
+    if figure8_spawn_cfg.get("spawn_mode") == "center_cutout":
+        return True
+    return bool(figure8_spawn_cfg.get("path_loop_ranges"))
+
+
+def _write_figure8_root_pose_from_spawn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    positions: torch.Tensor,
+    orientations: torch.Tensor,
+    rand_samples: torch.Tensor,
+    is_f8: torch.Tensor,
+    figure8_spawn_cfg: dict,
+    default_root_z: float,
+) -> None:
+    """8 字 env：根位置落在采样点；桥面或中心坑底由 ``spawn_mode`` 决定 Z 偏移。"""
+    if not is_f8.any():
+        return
+    origins = env.scene.env_origins[env_ids]
+    positions[is_f8, 0] = origins[is_f8, 0] + rand_samples[is_f8, 0]
+    positions[is_f8, 1] = origins[is_f8, 1] + rand_samples[is_f8, 1]
+    spawn_on_bridge = figure8_spawn_cfg.get("spawn_mode", "path") != "center_cutout"
+    if spawn_on_bridge:
+        bridge_h = float(figure8_spawn_cfg.get("bridge_height", 0.1))
+        positions[is_f8, 2] = origins[is_f8, 2] + float(default_root_z) + bridge_h
+    else:
+        positions[is_f8, 2] = origins[is_f8, 2] + float(default_root_z)
+    n = int(is_f8.sum().item())
+    device = env.device
+    roll = torch.zeros(n, device=device)
+    pitch = torch.zeros(n, device=device)
+    orientations[is_f8] = math_utils.quat_from_euler_xyz(roll, pitch, rand_samples[is_f8, 5])
+
+
+def _apply_terrain_specific_spawn_z_offset(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    positions: torch.Tensor,
+    terrain_specific_spawn_z_offset: dict[str, float] | None,
+    device: torch.device,
+) -> None:
+    """Add a constant z offset on reset for named sub-terrains (compensates flat-motion height on slopes)."""
+    if not terrain_specific_spawn_z_offset:
+        return
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
+
+    env_id_str = str(id(env))
+    if env_id_str not in _adaptive_terrain_state:
+        return
+    terrain_type_names_to_col_map = _adaptive_terrain_state[env_id_str]["terrain_type_names_to_col_map"]
+    terrain_types_for_envs = env.scene.terrain.terrain_types[env_ids]
+    for terrain_type, dz in terrain_specific_spawn_z_offset.items():
+        if terrain_type not in terrain_type_names_to_col_map:
+            continue
+        col_indices = terrain_type_names_to_col_map[terrain_type]
+        is_this_terrain = torch.zeros(len(env_ids), dtype=torch.bool, device=device)
+        for col_idx in col_indices:
+            is_this_terrain = is_this_terrain | (terrain_types_for_envs == col_idx)
+        if is_this_terrain.any():
+            positions[is_this_terrain, 2] += float(dz)
+
+
 def reset_root_state_amp(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -31,11 +211,13 @@ def reset_root_state_amp(
     reference_state_initialization: bool = False,
     prob_rsi: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    terrain_specific_yaw: dict[str, list[float]] | None = None,
+    terrain_specific_yaw: dict[str, list[float] | tuple[float, float]] | None = None,
     terrain_specific_pos_range: dict[str, dict[str, tuple[float, float]]] | None = None,
     terrain_specific_motion_files: dict[str, list[str]] | None = None,
     terrain_specific_motion_level_range: tuple[int, int] | None = None,
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
+    terrain_specific_spawn_z_offset: dict[str, float] | None = None,
+    terrain_specific_figure8_spawn: dict | None = None,
 ):
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
@@ -82,13 +264,19 @@ def reset_root_state_amp(
                     for col_idx in col_indices:
                         is_this_terrain = is_this_terrain | (terrain_types_for_envs == col_idx)
                     
-                    # For environments on this terrain, sample from fixed yaw angles
                     if is_this_terrain.any():
                         num_matching_envs = is_this_terrain.sum().item()
-                        # Randomly select from fixed yaw angles
-                        fixed_yaw_tensor = torch.tensor(fixed_yaw_angles, device=asset.device)
-                        selected_indices = torch.randint(0, len(fixed_yaw_angles), (num_matching_envs,), device=asset.device)
-                        yaw_samples[is_this_terrain] = fixed_yaw_tensor[selected_indices]
+                        if isinstance(fixed_yaw_angles, tuple) and len(fixed_yaw_angles) == 2:
+                            yaw_lo, yaw_hi = float(fixed_yaw_angles[0]), float(fixed_yaw_angles[1])
+                            yaw_samples[is_this_terrain] = math_utils.sample_uniform(
+                                yaw_lo, yaw_hi, (num_matching_envs,), device=asset.device
+                            )
+                        else:
+                            fixed_yaw_tensor = torch.tensor(fixed_yaw_angles, device=asset.device)
+                            selected_indices = torch.randint(
+                                0, len(fixed_yaw_angles), (num_matching_envs,), device=asset.device
+                            )
+                            yaw_samples[is_this_terrain] = fixed_yaw_tensor[selected_indices]
                 
                 # Replace yaw in rand_samples
                 rand_samples[:, 5] = yaw_samples
@@ -311,6 +499,10 @@ def reset_root_state_amp(
         # bias these values randomly
         joint_pos += math_utils.sample_uniform(*joint_pos_range, joint_pos.shape, joint_pos.device)
         joint_vel += math_utils.sample_uniform(*joint_vel_range, joint_vel.shape, joint_vel.device)
+
+    _apply_terrain_specific_spawn_z_offset(
+        env, env_ids, positions, terrain_specific_spawn_z_offset, asset.device
+    )
 
     # clamp joint pos to limits
     joint_pos_limits = asset.data.soft_joint_pos_limits[iter_env_ids, asset_cfg.joint_ids]

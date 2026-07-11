@@ -169,6 +169,22 @@ def _build_col_to_terrain_type_map(terrain_gen_cfg) -> dict[int, str]:
     return col_to_terrain_type_map
 
 
+def get_terrain_type_names_to_col_map(env: ManagerBasedRLEnv) -> dict[str, list[int]]:
+    """子地形名 → 列索引列表。优先用课程状态，否则按 terrain_generator 配置即时构建。"""
+    env_id_str = str(id(env))
+    if env_id_str in _adaptive_terrain_state:
+        return _adaptive_terrain_state[env_id_str]["terrain_type_names_to_col_map"]
+
+    terrain_gen = getattr(env.scene.terrain.cfg, "terrain_generator", None)
+    if terrain_gen is None:
+        return {}
+
+    col_to_name = _build_col_to_terrain_type_map(terrain_gen)
+    names_to_cols: dict[str, list[int]] = {}
+    for col_idx, type_name in col_to_name.items():
+        names_to_cols.setdefault(type_name, []).append(int(col_idx))
+    return names_to_cols
+
 def _initialize_adaptive_state(
     env: ManagerBasedRLEnv,
     terrain_gen_cfg,
@@ -561,16 +577,34 @@ def terrain_levels_vel(
     return torch.mean(terrain.terrain_levels.float())
 
 
+def _env_ids_on_terrain_types(
+    env: ManagerBasedRLEnv,
+    env_ids_tensor: torch.Tensor,
+    terrain_types: tuple[str, ...] | list[str],
+) -> torch.Tensor:
+    """``env_ids`` 子集中哪些机器人当前落在指定地形列上，形状 ``(len(env_ids),)`` bool。"""
+    asset: Articulation = env.scene["robot"]
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is not None:
+        col_indices = col_indices[env_ids_tensor]
+    positions = asset.data.root_link_pos_w[env_ids_tensor]
+    return _check_terrain_types_from_positions(env, positions, terrain_types, col_indices=col_indices)
+
 def terrain_levels_vel_with_termination(
     env: ManagerBasedRLEnv, env_ids: Sequence[int], asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
-    This function extends terrain_levels_vel with improved logic for handling cases without forward velocity commands:
-    - For cases with forward velocity command: uses the original logic (distance-based curriculum)
-    - For cases without forward velocity command:
-      - If robot terminated normally (timeout): keeps terrain level unchanged (no move_down)
-      - If robot fell down (termination): decreases terrain level (move_down)
+  This function extends terrain_levels_vel with improved logic for handling cases without forward velocity commands.
+
+    **figure8_bridge**
+    - move_up：沿 8 字中心线累计弧长 ≥ 单圆半周（``pi * r_c``）且未掉桥
+    - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
+    - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
+
+    **其它地形**
+    - 有前进速度指令：原距离课程
+    - 无前进速度指令：超时不变档；仅 ``fall_down_in_some_terrain`` 降档（不含姿态类终止）
 
     .. note::
         It is only possible to use this term with the terrain type ``generator``. For further information
@@ -628,33 +662,54 @@ def terrain_levels_vel_with_termination(
     move_up = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
     move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
 
-    # Case 1: Environments with forward velocity command - use original logic
-    has_vel_mask = has_forward_velocity
-    if has_vel_mask.any():
-        has_vel_indices = torch.where(has_vel_mask)[0]
+    is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
+    non_figure8 = ~is_figure8
 
-        # robots that walked far enough progress to harder terrains
-        move_up[has_vel_indices] = distance[has_vel_indices] > terrain_gen_cfg.size[0] / 2
-        # robots that walked less than half of their required distance go to simpler terrains
-        move_down_temp = distance[has_vel_indices] < command_vel_magnitude[has_vel_indices] * env.max_episode_length_s * 0.5
-        move_down_temp *= ~move_up[has_vel_indices]
-        move_down[has_vel_indices] = move_down_temp
+    # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
+    if is_figure8.any():
+        f8_local = torch.where(is_figure8)[0]
+        f8_env_ids = env_ids_tensor[f8_local]
+        fell_off = env.termination_manager.get_term("figure8_bridge_fall_off")[f8_env_ids]
 
-    # Case 2: Environments without forward velocity command - use termination-based logic
-    no_vel_mask = ~has_forward_velocity
-    if no_vel_mask.any():
-        no_vel_indices = torch.where(no_vel_mask)[0]
-        move_up[no_vel_indices] = distance[no_vel_indices] > terrain_gen_cfg.size[0] / 2
+        f8_sub = terrain_gen_cfg.sub_terrains.get("figure8_bridge")
+        inner_r = float(getattr(f8_sub, "inner_radius_m", 2.5)) if f8_sub is not None else 2.5
+        widths = tuple(getattr(f8_sub, "bridge_width_by_level", (0.8, 0.7, 0.6, 0.5, 0.45)))
+        from NoetixE1.terrains.custom_terrain.figure8_geometry import half_loop_arc_length_m
 
-        # Get the actual env_ids for environments without forward velocity (batch processing)
-        no_vel_env_ids_tensor = env_ids_tensor[no_vel_indices]
-        time_outs = env.termination_manager.time_outs[no_vel_env_ids_tensor]
-        terminated = env.termination_manager.terminated[no_vel_env_ids_tensor]
+        half_loop = half_loop_arc_length_m(
+            terrain.terrain_levels[f8_env_ids],
+            int(terrain_gen_cfg.num_rows),
+            inner_r,
+            widths,
+        )
+        episode_arc = getattr(env.unwrapped, "figure8_episode_arc_m", None)
+        if episode_arc is None:
+            arc_ok = torch.zeros(len(f8_local), dtype=torch.bool, device=env.device)
+        else:
+            arc_ok = episode_arc[f8_env_ids] >= half_loop
 
-        # For timeout (normal termination): keep level unchanged (no move_down)
-        # For termination (fell down): move_down
-        move_down[no_vel_indices] = terminated & ~time_outs
-        move_down[no_vel_indices] *= ~move_up[no_vel_indices]
+        move_up[f8_local] = arc_ok & ~fell_off
+        move_down[f8_local] = fell_off
+
+    # 其它地形：保留原距离 / 速度课程
+    if non_figure8.any():
+        nf_local = torch.where(non_figure8)[0]
+        has_vel_mask = has_forward_velocity[nf_local]
+        if has_vel_mask.any():
+            sub = nf_local[torch.where(has_vel_mask)[0]]
+            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
+            move_down_temp = distance[sub] < command_vel_magnitude[sub] * env.max_episode_length_s * 0.5
+            move_down_temp *= ~move_up[sub]
+            move_down[sub] = move_down_temp
+
+        no_vel_mask = ~has_forward_velocity[nf_local]
+        if no_vel_mask.any():
+            sub = nf_local[torch.where(no_vel_mask)[0]]
+            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
+            sub_env_ids = env_ids_tensor[sub]
+            fell_down = env.termination_manager.get_term("fall_down_in_some_terrain")[sub_env_ids]
+            move_down[sub] = fell_down
+            move_down[sub] *= ~move_up[sub]
 
     # update terrain levels
     terrain.update_env_origins(env_ids, move_up, move_down)

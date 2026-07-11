@@ -40,6 +40,28 @@ parser.add_argument("--depth_visual_interval", type=int, default=5, help="Visual
 parser.add_argument("--visualize_moe", action="store_true", default=False, help="Print and visualize MoE gate weights online.")
 parser.add_argument("--moe_visual_interval", type=int, default=10, help="Print/refresh MoE weights every N steps.")
 parser.add_argument("--moe_env_idx", type=int, default=0, help="Environment index used for MoE weight visualization.")
+parser.add_argument(
+    "--showcase_terrain",
+    type=str,
+    default="",
+    choices=[
+        "",
+        "interlaced_corridor_wedges",
+        "figure8_bridge",
+        "figure8_s_bridge",
+    ],
+    help=(
+        "Single-cell demo terrain: interlaced_corridor_wedges (纵向交错交叉斜坡), "
+        "figure8_bridge (闭合 8 字桥), figure8_s_bridge (半 8 字 S 开口桥). "
+        "Empty string disables."
+    ),
+)
+parser.add_argument(
+    "--showcase_difficulty",
+    type=float,
+    default=1.0,
+    help="Difficulty for --showcase_terrain single-cell demo (0.0–1.0).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -66,7 +88,19 @@ import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
 import NoetixE1.tasks  # noqa: F401
 import NoetixE1.terrains as terrain_gen  # 用于指定地形类型（取消注释下方代码时使用）
+from isaaclab.terrains import FlatPatchSamplingCfg
 import torch
+
+
+def _flat_patch_target_for_pose_command():
+    """供 PoseVelocityCommand 使用，生成器需写入 flat_patches['target']。"""
+    return {
+        "target": FlatPatchSamplingCfg(
+            num_patches=50,
+            patch_radius=[0.05, 0.10, 0.15, 0.20],
+            max_height_diff=0.05,
+        ),
+    }
 
 # 深度图可视化相关导入
 plt = None
@@ -156,7 +190,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.scene.terrain.terrain_generator.num_rows = 1
         env_cfg.scene.terrain.terrain_generator.num_cols = 1
         env_cfg.scene.terrain.terrain_generator.curriculum = False
-        env_cfg.scene.terrain.terrain_generator.difficulty_range = (0.1, 0.1)
+        env_cfg.scene.terrain.terrain_generator.difficulty_range = (
+            args_cli.showcase_difficulty,
+            args_cli.showcase_difficulty,
+        )
 
         # 测试带噪声的四种地形
         # 取消注释下面的配置来测试不同的地形（每次只测试一种）
@@ -209,18 +246,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         #     )
         # }
 
-        # 选项3: 带噪声的上楼梯
-        env_cfg.scene.terrain.terrain_generator.sub_terrains = {
-            "noisy_pyramid_stairs_up": terrain_gen.HfNoisyInvertedPyramidStairsTerrainCfg(
-                proportion=0.1,
-                step_height_range=(0.05, 0.25),
-                step_width_pixels_range=(10, 5),
-                platform_width=2.0,
-                border_width=0.5,
-                noise_range=(0.00, 0.00),
-                noise_step=0.02,
-            )
-        }
+        # 选项3: 带噪声的上楼梯（手动调试时取消注释；勿与 --showcase_terrain 同时使用）
+        # env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+        #     "noisy_pyramid_stairs_up": terrain_gen.HfNoisyInvertedPyramidStairsTerrainCfg(
+        #         proportion=0.1,
+        #         step_height_range=(0.05, 0.25),
+        #         step_width_pixels_range=(10, 5),
+        #         platform_width=2.0,
+        #         border_width=0.5,
+        #         noise_range=(0.00, 0.00),
+        #         noise_step=0.02,
+        #     )
+        # }
 
         # # 选项4: 带噪声的下楼梯
         # env_cfg.scene.terrain.terrain_generator.sub_terrains = {
@@ -309,6 +346,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         #     )
         # }
 
+        # --showcase_terrain 放在本分支末尾，覆盖上方手动取消注释的 sub_terrains
+        if args_cli.showcase_terrain:
+            st = args_cli.showcase_terrain
+            print(f"[INFO] showcase_terrain={st!r}, difficulty={args_cli.showcase_difficulty}")
+            if st == "interlaced_corridor_wedges":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    "interlaced_corridor_wedges": terrain_gen.HfInterlacedCorridorWedgesTerrainCfg(
+                        proportion=1.0,
+                        corridor_half_width_m=1.5,
+                        segment_length_m=1.5,
+                        num_segments=4,
+                        slope_angle_range=(15.0, 15.0),
+                        edge_blend_m=0.02,
+                        corridor_edge_fade_m=0.06,
+                        pattern_origin_x_m=-3.0,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "figure8_bridge":
+                env_cfg.scene.terrain.terrain_generator.size = (12.0, 12.0)
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    "figure8_bridge": terrain_gen.HfFigure8BridgeTerrainCfg(
+                        proportion=1.0,
+                        size=(12.0, 12.0),
+                        inner_radius_m=2.5,
+                        bridge_height=0.1,
+                        bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
+                        holes_depth=(0, 0),
+                        center_cutout_width_m=0.8,
+                        center_cutout_length_m=0.8,
+                    )
+                }
+            elif st == "figure8_s_bridge":
+                env_cfg.scene.terrain.terrain_generator.size = (12.0, 12.0)
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    "figure8_s_bridge": terrain_gen.HfFigure8SCurveBridgeTerrainCfg(
+                        proportion=1.0,
+                        size=(12.0, 12.0),
+                        inner_radius_m=2.5,
+                        bridge_height=0.1,
+                        bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
+                        holes_depth=(0, 0),
+                        center_cutout_width_m=0.8,
+                        center_cutout_length_m=0.4,
+                    )
+                }
+
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
     if CONTROL_ROBOT:
@@ -387,11 +471,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             step_size = 0.1
             command_term.reset_manual_command()
 
-            print("[INFO] Keyboard control enabled (W/S forward/back, A/D left/right, Q/E yaw, R reset command, T reset robot).")
+            print("[INFO] Keyboard control enabled (W/S forward/back, A/D left/right, Q/E yaw, R reset command, T reset robot, P print position).")
 
             def _print_command():
                 cmd = command_term.get_manual_command()[0].detach().cpu().tolist()
                 print(f"[CMD] Current command (x, y, yaw): {cmd}")
+
+            def _print_position():
+                scene = env.unwrapped.scene
+                root_pos_w = scene["robot"].data.root_pos_w[0].detach().cpu().tolist()
+                env_origin = scene.env_origins[0].detach().cpu().tolist()
+                local_xy = [root_pos_w[0] - env_origin[0], root_pos_w[1] - env_origin[1]]
+                print(f"[POS] local_xy (terrain cell): [{local_xy[0]:.3f}, {local_xy[1]:.3f}]")
 
             def _adjust(idx: int, delta: float):
                 with command_lock:
@@ -425,6 +516,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 elif char == "t":
                     reset_env_flag.set()
                     print("[INFO] Robot reset requested (T key pressed).")
+                elif char == "p":
+                    _print_position()
 
             command_listener = keyboard.Listener(on_press=_on_press)
             command_listener.daemon = True

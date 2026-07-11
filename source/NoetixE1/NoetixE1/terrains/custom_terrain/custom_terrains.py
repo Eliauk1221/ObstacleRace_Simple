@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from typing import TYPE_CHECKING
 
@@ -996,3 +998,246 @@ def hurdle_terrain(
 
     # round off the heights to the nearest vertical step
     return np.rint(hf_raw).astype(np.int16)
+
+
+def _smoothstep01(t: np.ndarray) -> np.ndarray:
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+@height_field_to_mesh
+def interlaced_corridor_wedges_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfInterlacedCorridorWedgesTerrainCfg
+) -> np.ndarray:
+    """Cross-slopes along +x: every segment uses y=±W (default ±1.5), width 3 m, slope direction alternates."""
+    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+    h_scale = cfg.horizontal_scale
+    v_scale = cfg.vertical_scale
+
+    sx, sy = float(cfg.size[0]), float(cfg.size[1])
+    W = float(cfg.corridor_half_width_m)
+    L = float(cfg.segment_length_m)
+    n_seg = int(cfg.num_segments)
+    if W <= 1e-6 or L <= 1e-6:
+        raise ValueError("corridor_half_width_m and segment_length_m must be positive.")
+    if n_seg < 1:
+        raise ValueError(f"num_segments must be >= 1, got {n_seg}")
+
+    blend = max(float(cfg.edge_blend_m), 1e-4)
+    blend_x = float(cfg.longitudinal_blend_m) if cfg.longitudinal_blend_m is not None else blend
+    blend_x = max(blend_x, 1e-4)
+    fade_y = max(float(cfg.corridor_edge_fade_m), 1e-4)
+
+    total_len = n_seg * L
+    full_width = 2.0 * W
+    y_lo = -W
+    y_hi = W
+
+    d_cur = float(min(1.0, max(0.0, difficulty)))
+    lo, hi = float(cfg.slope_angle_range[0]), float(cfg.slope_angle_range[1])
+    angle_deg = lo + d_cur * (hi - lo)
+    slope_rad = math.radians(angle_deg)
+    h_peak = math.tan(slope_rad) * full_width
+
+    x0 = float(cfg.pattern_origin_x_m)
+    ix = np.arange(width_pixels, dtype=np.float64)[:, None]
+    iy = np.arange(length_pixels, dtype=np.float64)[None, :]
+    px_m = (ix + 0.5) * h_scale - sx * 0.5
+    py_m = (iy + 0.5) * h_scale - sy * 0.5
+
+    rel_x = px_m - x0
+    in_pattern = (rel_x >= 0.0) & (rel_x < total_len)
+    kx = np.floor(rel_x / L)
+    valid_seg = in_pattern & (kx >= 0.0) & (kx < float(n_seg))
+    slope_up = np.mod(kx, 2) == 0
+
+    foot_x = _smoothstep01(rel_x / (2.0 * blend_x)) * _smoothstep01((total_len - rel_x) / (2.0 * blend_x))
+    foot_x = np.where(valid_seg, foot_x, 0.0)
+
+    ramp_up = np.clip((py_m - y_lo) / full_width, 0.0, 1.0)
+    ramp_down = np.clip((y_hi - py_m) / full_width, 0.0, 1.0)
+    edge_y = _smoothstep01((py_m - y_lo + blend) / (2.0 * blend)) * _smoothstep01((y_hi + blend - py_m) / (2.0 * blend))
+
+    h_up = h_peak * ramp_up * edge_y * foot_x
+    h_down = h_peak * ramp_down * edge_y * foot_x
+    h_m = np.where(slope_up, h_up, h_down)
+    h_m = np.where(valid_seg, h_m, 0.0)
+
+    path_mask = _smoothstep01((W + fade_y - np.abs(py_m)) / (2.0 * fade_y))
+    h_m *= path_mask
+
+    hf_raw = np.rint(h_m / v_scale).astype(np.float64)
+    return hf_raw.astype(np.int16)
+
+def _point_to_closed_polyline_dist(
+    px: np.ndarray, py: np.ndarray, pts: np.ndarray
+) -> np.ndarray:
+    """点到闭合折线的最短距离。
+
+    ``px`` 为 ``(W, 1)``、``py`` 为 ``(1, L)``（与高度场网格一致），返回 ``(W, L)`` 距离（米）。
+    """
+    px_b = np.asarray(px, dtype=np.float64).reshape(-1, 1)
+    py_b = np.asarray(py, dtype=np.float64).reshape(1, -1)
+    width_pixels, length_pixels = px_b.shape[0], py_b.shape[1]
+
+    a = pts
+    b = np.roll(pts, -1, axis=0)
+    ab = b - a
+    ab2 = np.maximum(np.sum(ab * ab, axis=1), 1e-12)
+
+    px_flat = np.broadcast_to(px_b, (width_pixels, length_pixels)).reshape(-1)
+    py_flat = np.broadcast_to(py_b, (width_pixels, length_pixels)).reshape(-1)
+    flat = np.stack([px_flat, py_flat], axis=1)
+    ap = flat[:, None, :] - a[None, :, :]
+    t = np.sum(ap * ab[None, :, :], axis=2) / ab2[None, :]
+    t = np.clip(t, 0.0, 1.0)
+    closest = a[None, :, :] + t[:, :, None] * ab[None, :, :]
+    diff = flat[:, None, :] - closest
+    dist = np.sqrt(np.min(np.sum(diff * diff, axis=2), axis=1))
+    return dist.reshape(width_pixels, length_pixels)
+
+
+def _figure8_annulus_footprint(
+    dist: np.ndarray, inner_r: float, outer_r: float, fade: float
+) -> np.ndarray:
+    """圆环桥面软边：``inner_r <= dist <= outer_r`` 为 1。"""
+    outside_inner = _smoothstep01((dist - inner_r + fade) / fade)
+    inside_outer = _smoothstep01((outer_r + fade - dist) / fade)
+    return outside_inner * inside_outer
+
+
+def _apply_figure8_center_cutout(
+    footprint: np.ndarray,
+    px_m: np.ndarray,
+    py_m: np.ndarray,
+    cutout_width_m: float,
+    cutout_length_m: float,
+) -> np.ndarray:
+    """原点挖空：强制为坑底（footprint=0），与 ``holes_depth`` 一致。"""
+    from .figure8_geometry import center_cutout_mask_numpy
+
+    cutout = center_cutout_mask_numpy(px_m, py_m, cutout_width_m, cutout_length_m)
+    if not np.any(cutout):
+        return footprint
+    return np.where(cutout, 0.0, footprint)
+
+
+@height_field_to_mesh
+def figure8_bridge_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfFigure8BridgeTerrainCfg
+) -> np.ndarray:
+    """平面闭合双 S（8 字）窄桥：坑底 + 可变宽桥面，中心交叉区加宽，无地面高台。
+
+    中心线：``X = R sin t``, ``Y = R sin t cos t``，``t ∈ [0, 2π)``，原点在 8 字几何中心。
+    """
+    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+    h_scale = cfg.horizontal_scale
+    v_scale = cfg.vertical_scale
+
+    widths = getattr(cfg, "bridge_width_by_level", None)
+    if widths is not None and len(widths) > 0:
+        level_max = len(widths) - 1
+        level_idx = int(np.clip(np.round(float(difficulty) * level_max), 0, level_max))
+        bridge_width = float(widths[level_idx])
+    else:
+        bridge_width = cfg.bridge_width_range[0] + difficulty * (
+            cfg.bridge_width_range[1] - cfg.bridge_width_range[0]
+        )
+
+    holes_depth_m = cfg.holes_depth[0] + difficulty * (cfg.holes_depth[1] - cfg.holes_depth[0])
+    h_top = float(cfg.bridge_height)
+    fade = max(float(cfg.radial_edge_fade_m), 1e-4)
+
+    sx, sy = float(cfg.size[0]), float(cfg.size[1])
+    ix = np.arange(width_pixels, dtype=np.float64)[:, None]
+    iy = np.arange(length_pixels, dtype=np.float64)[None, :]
+    px_m = (ix + 0.5) * h_scale - sx * 0.5
+    py_m = (iy + 0.5) * h_scale - sy * 0.5
+
+    from .figure8_geometry import centerline_radius_m, outer_radius_m
+
+    inner_r = float(cfg.inner_radius_m)
+    outer_r = outer_radius_m(inner_r, bridge_width)
+    r_c = centerline_radius_m(inner_r, bridge_width)
+    d_left = np.hypot(px_m + r_c, py_m)
+    d_right = np.hypot(px_m - r_c, py_m)
+    footprint = np.maximum(
+        _figure8_annulus_footprint(d_left, inner_r, outer_r, fade),
+        _figure8_annulus_footprint(d_right, inner_r, outer_r, fade),
+    )
+    footprint = _apply_figure8_center_cutout(
+        footprint,
+        px_m,
+        py_m,
+        float(getattr(cfg, "center_cutout_width_m", 0.0)),
+        float(getattr(cfg, "center_cutout_length_m", 0.0)),
+    )
+
+    h_m = np.full((width_pixels, length_pixels), holes_depth_m, dtype=np.float64)
+    h_m = np.maximum(h_m, h_top * footprint)
+
+    hf_raw = np.rint(h_m / v_scale).astype(np.float64)
+    return hf_raw.astype(np.int16)
+
+
+@height_field_to_mesh
+def figure8_s_curve_bridge_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfFigure8SCurveBridgeTerrainCfg
+) -> np.ndarray:
+    """半 8 字 → S 形开口桥：坑底 + 可变宽桥面（保留左上半环 + 右下半环）。"""
+    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+    h_scale = cfg.horizontal_scale
+    v_scale = cfg.vertical_scale
+
+    widths = getattr(cfg, "bridge_width_by_level", None)
+    if widths is not None and len(widths) > 0:
+        level_max = len(widths) - 1
+        level_idx = int(np.clip(np.round(float(difficulty) * level_max), 0, level_max))
+        bridge_width = float(widths[level_idx])
+    else:
+        bridge_width = cfg.bridge_width_range[0] + difficulty * (
+            cfg.bridge_width_range[1] - cfg.bridge_width_range[0]
+        )
+
+    holes_depth_m = cfg.holes_depth[0] + difficulty * (cfg.holes_depth[1] - cfg.holes_depth[0])
+    h_top = float(cfg.bridge_height)
+    fade = max(float(cfg.radial_edge_fade_m), 1e-4)
+
+    sx, sy = float(cfg.size[0]), float(cfg.size[1])
+    ix = np.arange(width_pixels, dtype=np.float64)[:, None]
+    iy = np.arange(length_pixels, dtype=np.float64)[None, :]
+    px_m = (ix + 0.5) * h_scale - sx * 0.5
+    py_m = (iy + 0.5) * h_scale - sy * 0.5
+
+    from .figure8_geometry import centerline_radius_m, outer_radius_m
+
+    inner_r = float(cfg.inner_radius_m)
+    outer_r = outer_radius_m(inner_r, bridge_width)
+    r_c = centerline_radius_m(inner_r, bridge_width)
+
+    # 左圆（圆心 -r_c）：只保留 y>=0 的半环
+    d_left = np.hypot(px_m + r_c, py_m)
+    fp_left = _figure8_annulus_footprint(d_left, inner_r, outer_r, fade)
+    fp_left = np.where(py_m >= 0.0, fp_left, 0.0)
+
+    # 右圆（圆心 +r_c）：只保留 y<=0 的半环
+    d_right = np.hypot(px_m - r_c, py_m)
+    fp_right = _figure8_annulus_footprint(d_right, inner_r, outer_r, fade)
+    fp_right = np.where(py_m <= 0.0, fp_right, 0.0)
+
+    footprint = np.maximum(fp_left, fp_right)
+    footprint = _apply_figure8_center_cutout(
+        footprint,
+        px_m,
+        py_m,
+        float(getattr(cfg, "center_cutout_width_m", 0.0)),
+        float(getattr(cfg, "center_cutout_length_m", 0.0)),
+    )
+
+    h_m = np.full((width_pixels, length_pixels), holes_depth_m, dtype=np.float64)
+    h_m = np.maximum(h_m, h_top * footprint)
+
+    hf_raw = np.rint(h_m / v_scale).astype(np.float64)
+    return hf_raw.astype(np.int16)
