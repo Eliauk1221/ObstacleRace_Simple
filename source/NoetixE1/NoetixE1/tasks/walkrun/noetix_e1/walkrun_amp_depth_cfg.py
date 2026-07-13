@@ -259,7 +259,7 @@ class CommandsCfg:
                 zero_prob=[0.5, 0.9, 0.5],
             ),
             "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
-                lin_vel_x=(0.0, 2.5),
+                lin_vel_x=(0.0, 1.5),
                 lin_vel_y=(0.0, 0.5),
                 ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.5, 0.9, 0.5],
@@ -762,7 +762,7 @@ class RewardsCfg:
     )
     figure8_path_forward = RewTerm(
         func=mdp.figure8_bridge_path_forward_reward,
-        weight=0.5,
+        weight=-0.5,
         params={
             "terrain_types": ("figure8_bridge",),
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
@@ -792,14 +792,10 @@ class RewardsCfg:
             "progress_scale": 1.0,
         },
     )
-    figure8_low_speed = RewTerm(
-        func=mdp.low_speed_reward,
-        weight=0.95,
-        params={"min_cmd_vel": 0.1, "terrain_types": ("figure8_bridge",)},
-    )
+
     figure8_feet_impact = RewTerm(
         func=mdp.feet_impact,
-        weight=-10.0,
+        weight=-3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "terrain_types": ("figure8_bridge",),
@@ -808,7 +804,7 @@ class RewardsCfg:
 
     interlaced_corridor_centerline = RewTerm(
         func=mdp.interlaced_corridor_centerline_penalty,
-        weight=-0.5,
+        weight=-4,
         params={
             "terrain_types": ("interlaced_corridor_wedges",),
             "min_forward_command": 0.3,
@@ -817,7 +813,7 @@ class RewardsCfg:
     )
     interlaced_ramp_step_up_lift = RewTerm(
         func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
-        weight=6,
+        weight=1,
         params={
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
@@ -1067,8 +1063,8 @@ class TerminationsCfg:
         func=mdp.interlaced_corridor_approach_deviation,
         params={
             "terrain_types": ("interlaced_corridor_wedges",),
-            "local_x_range": (-4.0, -2.85),
-            "y_range": (-1.0, -0.15),
+            "local_x_range": (-4.0, -2.75),
+            "y_range": (-1.15, 0.05),
             "min_forward_command": 0.3,
         },
     )
@@ -1119,6 +1115,8 @@ class WalkRunDepthEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
+        # Default 2**26 (64MB) overflows with 4096 envs + 12x12 heightfield; env.yaml uses 256MB
+        self.sim.physx.gpu_collision_stack_size = 268435456
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
 
         # update sensor update periods

@@ -247,8 +247,8 @@ def figure8_bridge_riser_strike(
 def interlaced_corridor_approach_deviation(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...] = ("interlaced_corridor_wedges",),
-    local_x_range: tuple[float, float] = (-4.0, -2.85),
-    y_range: tuple[float, float] = (-1.0, -0.15),
+    local_x_range: tuple[float, float] = (-4.0, -2.75),
+    y_range: tuple[float, float] = (-1.15, 0.05),
     min_forward_command: float = 0.3,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
