@@ -399,7 +399,11 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     return torch.sum(is_contact, dim=1)
 
 def low_speed_reward(
-    env: ManagerBasedRLEnv, min_cmd_vel: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    min_cmd_vel: float,
+    terrain_types: tuple[str, ...] | None = None,
+    skip_terrain_types: tuple[str, ...] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
@@ -422,7 +426,15 @@ def low_speed_reward(
     reward[speed_too_high] = 0.
     # Speed within desired range
     reward[speed_desired] = 1.2
-    return reward * (absolute_command > abs(min_cmd_vel))
+    reward = reward * (absolute_command > abs(min_cmd_vel))
+    device = reward.device
+    if skip_terrain_types:
+        on_skip = _terrain_type_mask(env, skip_terrain_types, device)
+        reward = reward * (~on_skip).float()
+    if terrain_types:
+        on_terrain = _terrain_type_mask(env, terrain_types, device)
+        reward = reward * on_terrain.float()
+    return reward
 
 
 def delta_yaw_reward(
@@ -722,6 +734,39 @@ def corridor_centerline_exp(
         active = active & (local_x >= x_lo) & (local_x <= x_hi)
 
     return reward * active.float()
+
+
+def interlaced_corridor_centerline_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("interlaced_corridor_wedges",),
+    local_x_range: tuple[float, float] = (-3.0, 1.5),
+    min_forward_command: float = 0.3,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """交叉斜坡：前三段（x∈[x_lo, x_hi)）偏离走廊中心 y=0 的惩罚。
+
+    ``local_x_range`` 上界默认 1.5 m，对应第 4 段起点；第 4 段不施加此项。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    local_x = local_xy[:, 0]
+    local_y = local_xy[:, 1]
+    penalty = torch.square(local_y)
+
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        on_terrain = _check_terrain_types_from_positions(env, asset.data.root_pos_w, terrain_types)
+    else:
+        on_terrain = _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+
+    x_lo, x_hi = local_x_range
+    active = on_terrain & (cmd_x > min_forward_command) & (local_x >= x_lo) & (local_x < x_hi)
+    return penalty * active.float()
 
 
 def interlaced_corridor_ramp_step_up_lift_reward(

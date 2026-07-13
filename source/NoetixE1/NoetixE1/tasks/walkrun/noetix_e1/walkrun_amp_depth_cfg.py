@@ -597,6 +597,14 @@ class EventCfg:
             "terrain_specific_spawn_z_offset": {
                 "interlaced_corridor_wedges": -0.6,
             },
+            "terrain_specific_figure8_spawn": {
+                "spawn_mode": "center_cutout",
+                "center_cutout_width_m": 0.8,
+                "center_cutout_length_m": 0.8,
+                "base_yaw_angles": (1.57, -1.57),
+                "yaw_jitter_deg": 45.0,
+                "position_noise": 0.0,
+            },
         },
     )
 
@@ -717,7 +725,11 @@ class RewardsCfg:
         weight=1.0,
         params={"std": 0.5, "skip_terrain_types": ("figure8_bridge",)},
     )
-    low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
+    low_speed = RewTerm(
+        func=mdp.low_speed_reward,
+        weight=0.5,
+        params={"min_cmd_vel": 0.1, "skip_terrain_types": ("figure8_bridge",)},
+    )
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
@@ -748,6 +760,43 @@ class RewardsCfg:
             "edge_buffer_m": 0.05,
         },
     )
+    figure8_path_forward = RewTerm(
+        func=mdp.figure8_bridge_path_forward_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("figure8_bridge",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "bridge_height": 0.1,
+            "bridge_tol": 0.04,
+            "inner_radius_m": 2.5,
+            "bridge_width_m": 0.5,
+            "std": 0.25,
+            "min_cmd_speed": 0.1,
+        },
+    )
+    figure8_path_progress = RewTerm(
+        func=mdp.figure8_bridge_path_progress_reward,
+        weight=0.2,
+        params={
+            "terrain_types": ("figure8_bridge",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "bridge_height": 0.1,
+            "bridge_tol": 0.04,
+            "inner_radius_m": 2.5,
+            "bridge_width_m": 0.5,
+            "min_v_along": 0.05,
+            "progress_scale": 1.0,
+        },
+    )
+    figure8_low_speed = RewTerm(
+        func=mdp.low_speed_reward,
+        weight=0.95,
+        params={"min_cmd_vel": 0.1, "terrain_types": ("figure8_bridge",)},
+    )
     figure8_feet_impact = RewTerm(
         func=mdp.feet_impact,
         weight=-10.0,
@@ -757,14 +806,13 @@ class RewardsCfg:
         },
     )
 
-    corridor_centerline = RewTerm(
-        func=mdp.corridor_centerline_exp,
-        weight=0.5,
+    interlaced_corridor_centerline = RewTerm(
+        func=mdp.interlaced_corridor_centerline_penalty,
+        weight=-0.5,
         params={
-            "std": 0.2,
             "terrain_types": ("interlaced_corridor_wedges",),
             "min_forward_command": 0.3,
-            "local_x_range": (-3.0, 3.0),
+            "local_x_range": (-3.0, 1.5),
         },
     )
     interlaced_ramp_step_up_lift = RewTerm(
@@ -832,14 +880,14 @@ class RewardsCfg:
 
     volume_points_penetration = RewTerm(
         func=mdp.volume_points_penetration,
-        weight=-1.0,
+        weight=-3.0,
         params={
             "sensor_cfg": SceneEntityCfg("leg_volume_points"),
             "terrain_types": (
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
-                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
-                "interlaced_corridor_wedges",
+                "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1", "figure8_bridge",
+
             ),
         },
     )
@@ -1013,6 +1061,15 @@ class TerminationsCfg:
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "contact_force_threshold": 0.5,
             "root_drop_threshold_m": 0.06,
+        },
+    )
+    interlaced_corridor_approach_deviation = DoneTerm(
+        func=mdp.interlaced_corridor_approach_deviation,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges",),
+            "local_x_range": (-4.0, -2.85),
+            "y_range": (-1.0, -0.15),
+            "min_forward_command": 0.3,
         },
     )
     # (5) Out of Bounds

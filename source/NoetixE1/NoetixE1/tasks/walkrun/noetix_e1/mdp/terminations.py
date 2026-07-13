@@ -244,6 +244,42 @@ def figure8_bridge_riser_strike(
     terminate = on_terrain & foot_strike.any(dim=1)
     return terminate
 
+def interlaced_corridor_approach_deviation(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("interlaced_corridor_wedges",),
+    local_x_range: tuple[float, float] = (-4.0, -2.85),
+    y_range: tuple[float, float] = (-1.0, -0.15),
+    min_forward_command: float = 0.3,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """交叉斜坡：坡前 approach 区偏离低侧通道则终止。
+
+    仅在 ``interlaced_corridor_wedges`` 上、``cmd_x > min_forward_command`` 且
+    ``local_x`` 落在 ``local_x_range`` 时检查；``local_y`` 超出 ``y_range`` 即 done。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    local_x = local_xy[:, 0]
+    local_y = local_xy[:, 1]
+
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        on_terrain = _check_terrain_types_from_positions(env, asset.data.root_pos_w, terrain_types)
+    else:
+        on_terrain = _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+
+    x_lo, x_hi = local_x_range
+    y_lo, y_hi = y_range
+    in_zone = on_terrain & (cmd_x > min_forward_command) & (local_x >= x_lo) & (local_x <= x_hi)
+    out_of_channel = (local_y < y_lo) | (local_y > y_hi)
+    return in_zone & out_of_channel
+
+
 def terrain_out_of_bounds(
     env: ManagerBasedRLEnv,
     asset_cfg: str = "robot",

@@ -599,7 +599,7 @@ _DEPTH6_FLAT_PATCH_TARGET = {
 # DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges + figure8_bridge
 DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     curriculum=True,
-    size=(8.0, 8.0),
+    size=(12.0, 12.0),
     border_width=20.0,
     num_rows=10,
     num_cols=10,
@@ -673,6 +673,8 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         "figure8_bridge": HfFigure8BridgeTerrainCfg(
             proportion=0.2,
             size=(12.0, 12.0),
+            horizontal_scale=0.05,
+            vertical_scale=0.005,
             inner_radius_m=2.5,
             bridge_height=0.1,
             bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
