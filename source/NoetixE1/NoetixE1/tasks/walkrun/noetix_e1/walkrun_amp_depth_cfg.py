@@ -570,7 +570,7 @@ class EventCfg:
                 "cross_stepping_stones2": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "cross_stepping_stones1": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "beam": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
-                "interlaced_corridor_wedges": (-0.5235987755982988, 0.5235987755982988),
+                "interlaced_corridor_wedges": (-0.5235987755982988, 0.5235987755982988),  # +/- 30 deg
             },
             "terrain_specific_pos_range": {
                 "cross_stepping_stones3": {
@@ -590,12 +590,12 @@ class EventCfg:
                     "y": (-0.1, 0.1),  # y 范围限制在 -0.3 到 0.3
                 },
                 "interlaced_corridor_wedges": {
-                    "x": (-4.0, -3.2),
-                    "y": (-0.75, -0.25),
+                    "x": (-2.25, -2.25),  # First 1.5 m segment center: -3.0 + 1.5 / 2.
+                    "y": (0.0, 0.0),
                 },
             },
             "terrain_specific_spawn_z_offset": {
-                "interlaced_corridor_wedges": -0.6,
+                "interlaced_corridor_wedges": -0.2,
             },
         },
     )
