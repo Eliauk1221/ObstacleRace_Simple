@@ -757,6 +757,8 @@ class RewardsCfg:
         },
     )
 
+    # ------------------------------------------- interlaced_corridor_wedges -------------------------------------------
+
     corridor_centerline = RewTerm(
         func=mdp.corridor_centerline_exp,
         weight=0.5,
@@ -887,7 +889,6 @@ class RewardsCfg:
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
-                "interlaced_corridor_wedges",
             ),
         },
     )
