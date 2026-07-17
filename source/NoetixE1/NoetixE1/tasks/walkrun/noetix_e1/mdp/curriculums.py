@@ -591,7 +591,12 @@ def _env_ids_on_terrain_types(
     return _check_terrain_types_from_positions(env, positions, terrain_types, col_indices=col_indices)
 
 def terrain_levels_vel_with_termination(
-    env: ManagerBasedRLEnv, env_ids: Sequence[int], asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    interlaced_corridor_progress_start_x: float = -2.25,
+    interlaced_corridor_required_progress_m: float = 5.0,
+    interlaced_corridor_max_final_abs_y: float = 0.6,
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
@@ -691,9 +696,32 @@ def terrain_levels_vel_with_termination(
         move_up[f8_local] = arc_ok & ~fell_off
         move_down[f8_local] = fell_off
 
-    # 其它地形：保留原距离 / 速度课程
-    if non_figure8.any():
-        nf_local = torch.where(non_figure8)[0]
+    # Interlaced corridor: success is forward progress from its fixed spawn point.
+    # Euclidean distance would incorrectly count lateral drift as task progress.
+    is_interlaced = _env_ids_on_terrain_types(env, env_ids_tensor, ("interlaced_corridor_wedges",))
+    if is_interlaced.any():
+        ic_local = torch.where(is_interlaced)[0]
+        ic_env_ids = env_ids_tensor[ic_local]
+        ic_has_forward = has_forward_velocity[ic_local]
+        ic_local_x = asset.data.root_pos_w[ic_env_ids, 0] - env.scene.env_origins[ic_env_ids, 0]
+        ic_local_y = asset.data.root_pos_w[ic_env_ids, 1] - env.scene.env_origins[ic_env_ids, 1]
+        ic_progress = ic_local_x - float(interlaced_corridor_progress_start_x)
+        ic_success = (
+            ic_has_forward
+            & (ic_progress > float(interlaced_corridor_required_progress_m))
+            & (torch.abs(ic_local_y) <= float(interlaced_corridor_max_final_abs_y))
+        )
+        move_up[ic_local] = ic_success
+        move_down[ic_local] = (
+            ic_has_forward
+            & ~ic_success
+            & (ic_progress < 0.5 * float(interlaced_corridor_required_progress_m))
+        )
+
+    # Other non-figure8 terrains retain the distance / velocity curriculum.
+    other_non_figure8 = non_figure8 & ~is_interlaced
+    if other_non_figure8.any():
+        nf_local = torch.where(other_non_figure8)[0]
         has_vel_mask = has_forward_velocity[nf_local]
         if has_vel_mask.any():
             sub = nf_local[torch.where(has_vel_mask)[0]]

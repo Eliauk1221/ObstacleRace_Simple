@@ -681,23 +681,31 @@ def volume_points_penetration(
     return punish
 
 
-def corridor_centerline_exp(
+def corridor_centerline_quadratic(
     env: ManagerBasedRLEnv,
-    std: float,
+    zero_crossing_m: float,
+    max_penalty: float,
     terrain_types: tuple[str, ...],
     min_forward_command: float = 0.3,
     local_x_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward staying near the corridor centerline (local y=0) on named terrains.
+    """Reward the centerline and increasingly penalize large lateral deviation.
 
-    Uses terrain-cell coordinates: ``local_xy = root_pos_w.xy - env_origins.xy``.
-    Active when forward velocity command exceeds ``min_forward_command``.
+    The unweighted value is ``1 - (abs(local_y) / zero_crossing_m)^2``.
+    It is positive inside the center band, becomes zero at ``zero_crossing_m``,
+    and remains negative outside that band (clamped by ``max_penalty``).
     """
+    if zero_crossing_m <= 0.0:
+        raise ValueError(f"zero_crossing_m must be positive, got {zero_crossing_m}.")
+    if max_penalty <= 0.0:
+        raise ValueError(f"max_penalty must be positive, got {max_penalty}.")
+
     asset: Articulation = env.scene[asset_cfg.name]
     local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
     local_y = local_xy[:, 1]
-    reward = torch.exp(-torch.square(local_y) / (std**2))
+    reward = 1.0 - torch.square(local_y / float(zero_crossing_m))
+    reward = reward.clamp(min=-float(max_penalty), max=1.0)
 
     from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
 
@@ -724,16 +732,23 @@ def corridor_tangent_alignment_exp(
     std: float,
     terrain_types: tuple[str, ...],
     min_forward_command: float = 0.3,
+    max_lateral_command: float = 0.05,
+    max_yaw_command: float = 0.05,
     local_x_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward alignment with the +x tangent of a straight corridor."""
+    """Reward +x heading only for commands that request straight traversal."""
     asset: Articulation = env.scene[asset_cfg.name]
     _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w)
     reward = torch.exp(-torch.square(math_utils.wrap_to_pi(yaw)) / (std**2))
 
     command = env.command_manager.get_command("base_velocity")
-    active = _terrain_type_mask(env, terrain_types, asset.device) & (command[:, 0] > min_forward_command)
+    active = (
+        _terrain_type_mask(env, terrain_types, asset.device)
+        & (command[:, 0] > min_forward_command)
+        & (torch.abs(command[:, 1]) <= max_lateral_command)
+        & (torch.abs(command[:, 2]) <= max_yaw_command)
+    )
     if local_x_range is not None:
         local_x = asset.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
         active &= (local_x >= local_x_range[0]) & (local_x <= local_x_range[1])

@@ -256,7 +256,7 @@ class CommandsCfg:
                 lin_vel_x=(0.3, 1.5),
                 lin_vel_y=(-0.2, 0.2),
                 ang_vel_z=(-0.5, 0.5),
-                zero_prob=[0.5, 0.9, 0.5],
+                zero_prob=[0.5, 0.9, 0.8],
             ),
             "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
                 lin_vel_x=(0.0, 2.5),
@@ -718,14 +718,14 @@ class RewardsCfg:
         params={
             "std": 0.5,
             "skip_terrain_types": ("figure8_bridge",),
-            "terrain_reward_scales": {"interlaced_corridor_wedges": 0.25},
+            "terrain_reward_scales": {"interlaced_corridor_wedges": 0.5},
         },
     )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
-        params={"terrain_reward_scales": {"figure8_bridge": 0.0, "interlaced_corridor_wedges": 0.25}},
+        params={"terrain_reward_scales": {"figure8_bridge": 0.0, "interlaced_corridor_wedges": 0.5}},
     )
     lin_vel_dir_reward = RewTerm(func=mdp.lin_vel_dir_reward, weight=-0.5)
 
@@ -764,10 +764,11 @@ class RewardsCfg:
     # ------------------------------------------- interlaced_corridor_wedges -------------------------------------------
 
     corridor_centerline = RewTerm(
-        func=mdp.corridor_centerline_exp,
+        func=mdp.corridor_centerline_quadratic,
         weight=0.5,
         params={
-            "std": 0.2,
+            "zero_crossing_m": 0.30,
+            "max_penalty": 3.0,
             "terrain_types": ("interlaced_corridor_wedges",),
             "min_forward_command": 0.3,
             "local_x_range": (-3.0, 3.0),
@@ -780,6 +781,8 @@ class RewardsCfg:
             "std": 0.4,
             "terrain_types": ("interlaced_corridor_wedges",),
             "min_forward_command": 0.3,
+            "max_lateral_command": 0.05,
+            "max_yaw_command": 0.05,
             "local_x_range": (-3.0, 3.0),
         },
     )
@@ -1040,7 +1043,14 @@ class CurriculumCfg:
 
     # terrain_levels = CurrTerm(func=mdp.terrain_levels_adaptive)
     # terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
-    terrain_levels = CurrTerm(func=mdp.terrain_levels_vel_with_termination)
+    terrain_levels = CurrTerm(
+        func=mdp.terrain_levels_vel_with_termination,
+        params={
+            "interlaced_corridor_progress_start_x": -2.25,
+            "interlaced_corridor_required_progress_m": 5.0,
+            "interlaced_corridor_max_final_abs_y": 0.6,
+        },
+    )
     # pass
 
 
