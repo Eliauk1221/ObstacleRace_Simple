@@ -715,13 +715,17 @@ class RewardsCfg:
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_world_exp,
         weight=1.0,
-        params={"std": 0.5, "skip_terrain_types": ("figure8_bridge",)},
+        params={
+            "std": 0.5,
+            "skip_terrain_types": ("figure8_bridge",),
+            "terrain_reward_scales": {"interlaced_corridor_wedges": 0.25},
+        },
     )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
-        params={"terrain_types": ("figure8_bridge",), "scale_on_terrain": 0.0},
+        params={"terrain_reward_scales": {"figure8_bridge": 0.0, "interlaced_corridor_wedges": 0.25}},
     )
     lin_vel_dir_reward = RewTerm(func=mdp.lin_vel_dir_reward, weight=-0.5)
 
@@ -769,21 +773,31 @@ class RewardsCfg:
             "local_x_range": (-3.0, 3.0),
         },
     )
-    interlaced_ramp_step_up_lift = RewTerm(
-        func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
-        weight=6,
+    corridor_tangent_alignment = RewTerm(
+        func=mdp.corridor_tangent_alignment_exp,
+        weight=0.25,
         params={
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
-            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
-            "offset": 0.06,
-            "clearance_threshold": 0.15,
-            "std": 0.05,
-            "x_range": (-3.4, -2.8),
-            "min_forward_command": 0.3,
+            "std": 0.4,
             "terrain_types": ("interlaced_corridor_wedges",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-3.0, 3.0),
         },
     )
+    # interlaced_ramp_step_up_lift = RewTerm(
+    #     func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
+    #     weight=6,
+    #     params={
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+    #         "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+    #         "offset": 0.06,
+    #         "clearance_threshold": 0.15,
+    #         "std": 0.05,
+    #         "x_range": (-3.4, -2.8),
+    #         "min_forward_command": 0.3,
+    #         "terrain_types": ("interlaced_corridor_wedges",),
+    #     },
+    # )
     # ------------------------------------------------- Base --------------------------------------------------
     flat_orientation_exp = RewTerm(func=mdp.flat_orientation_exp, weight=0.5, params={"std": 0.5})
     # ------------------------------------------------- Feet --------------------------------------------------

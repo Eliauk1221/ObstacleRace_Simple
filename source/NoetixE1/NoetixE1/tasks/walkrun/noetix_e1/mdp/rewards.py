@@ -82,8 +82,9 @@ def track_ang_vel_z_world_exp(
     std: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     skip_terrain_types: tuple[str, ...] | None = None,
+    terrain_reward_scales: dict[str, float] | None = None,
 ) -> torch.Tensor:
-    """Track yaw rate command. On ``skip_terrain_types`` terrains return 1.0 so the policy may turn freely."""
+    """Track yaw-rate commands with optional terrain-specific reward scales."""
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command("base_velocity")
     ang_vel_error = torch.square(command[:, 2] - asset.data.root_ang_vel_w[:, 2])
@@ -91,7 +92,7 @@ def track_ang_vel_z_world_exp(
     if skip_terrain_types:
         on_terrain = _terrain_type_mask(env, skip_terrain_types, reward.device)
         reward = torch.where(on_terrain, torch.ones_like(reward), reward)
-    return reward
+    return _apply_terrain_reward_scales(env, reward, terrain_reward_scales)
 
 
 def flat_orientation_exp(
@@ -440,17 +441,11 @@ def delta_yaw_reward(
 
 def delta_yaw_reward_terrain_rescale(
     env: ManagerBasedRLEnv,
-    terrain_types: tuple[str, ...],
-    scale_on_terrain: float,
+    terrain_reward_scales: dict[str, float],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """``delta_yaw_reward``，在指定子地形上将惩罚乘以 ``scale_on_terrain``（0 即关闭）。"""
-    punish = delta_yaw_reward(env, asset_cfg)
-    if not terrain_types:
-        return punish
-    mask = _terrain_type_mask(env, terrain_types, env.device)
-    scale = torch.where(mask, torch.full_like(punish, float(scale_on_terrain)), torch.ones_like(punish))
-    return punish * scale
+    """Rescale yaw-rate tracking penalties on selected terrain types."""
+    return _apply_terrain_reward_scales(env, delta_yaw_reward(env, asset_cfg), terrain_reward_scales)
 
 
 def delta_yaw_penalty_exp(
@@ -724,6 +719,27 @@ def corridor_centerline_exp(
     return reward * active.float()
 
 
+def corridor_tangent_alignment_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward alignment with the +x tangent of a straight corridor."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w)
+    reward = torch.exp(-torch.square(math_utils.wrap_to_pi(yaw)) / (std**2))
+
+    command = env.command_manager.get_command("base_velocity")
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (command[:, 0] > min_forward_command)
+    if local_x_range is not None:
+        local_x = asset.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
+        active &= (local_x >= local_x_range[0]) & (local_x <= local_x_range[1])
+    return reward * active.float()
+
+
 def interlaced_corridor_ramp_step_up_lift_reward(
     env: ManagerBasedRLEnv,
     contact_sensor_cfg: SceneEntityCfg,
@@ -818,6 +834,21 @@ def _terrain_type_mask(
         asset: Articulation = env.scene["robot"]
         return _check_terrain_types_from_positions(env, asset.data.root_link_pos_w, terrain_types)
     return _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+
+def _apply_terrain_reward_scales(
+    env: ManagerBasedRLEnv, reward: torch.Tensor, terrain_reward_scales: dict[str, float] | None
+) -> torch.Tensor:
+    if not terrain_reward_scales:
+        return reward
+    scale = torch.ones_like(reward)
+    for terrain_type, value in terrain_reward_scales.items():
+        scale = torch.where(
+            _terrain_type_mask(env, (terrain_type,), reward.device),
+            torch.full_like(scale, float(value)),
+            scale,
+        )
+    return reward * scale
 
 
 def _get_figure8_polyline(
