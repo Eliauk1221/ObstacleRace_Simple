@@ -724,6 +724,43 @@ def corridor_centerline_exp(
     return reward * active.float()
 
 
+def corridor_world_x_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    safe_half_width_m: float,
+    max_forward_speed: float,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward positive world-x progress while the robot remains in the safe corridor band.
+
+    The reward manager integrates this world-frame velocity with ``dt``, so the
+    return is proportional to forward x displacement rather than body-frame speed.
+    """
+    if safe_half_width_m <= 0.0:
+        raise ValueError(f"safe_half_width_m must be positive, got {safe_half_width_m}.")
+    if max_forward_speed <= 0.0:
+        raise ValueError(f"max_forward_speed must be positive, got {max_forward_speed}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+
+    active = (
+        _terrain_type_mask(env, terrain_types, asset.device)
+        & (cmd_x > min_forward_command)
+        & (torch.abs(local_xy[:, 1]) <= float(safe_half_width_m))
+    )
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    forward_speed = asset.data.root_lin_vel_w[:, 0].clamp(min=0.0, max=float(max_forward_speed))
+    return forward_speed * active.float()
+
+
 def interlaced_corridor_ramp_step_up_lift_reward(
     env: ManagerBasedRLEnv,
     contact_sensor_cfg: SceneEntityCfg,

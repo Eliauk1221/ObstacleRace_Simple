@@ -254,8 +254,8 @@ class CommandsCfg:
             ),
             "interlaced_corridor_wedges": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
                 lin_vel_x=(0.3, 1.5),
-                lin_vel_y=(-0.2, 0.2),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.5, 0.9, 0.5],
             ),
             "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
@@ -765,6 +765,17 @@ class RewardsCfg:
         params={
             "std": 0.2,
             "terrain_types": ("interlaced_corridor_wedges",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-3.0, 3.0),
+        },
+    )
+    corridor_world_x_progress = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.3,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges",),
+            "safe_half_width_m": 0.7,
+            "max_forward_speed": 1.5,
             "min_forward_command": 0.3,
             "local_x_range": (-3.0, 3.0),
         },
