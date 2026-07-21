@@ -715,13 +715,13 @@ class RewardsCfg:
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_world_exp,
         weight=1.0,
-        params={"std": 0.5, "skip_terrain_types": ("figure8_bridge",)},
+        params={"std": 0.5, "skip_terrain_types": ("figure8_bridge", "interlaced_corridor_wedges")},
     )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
-        params={"terrain_types": ("figure8_bridge",), "scale_on_terrain": 0.0},
+        params={"terrain_types": ("figure8_bridge", "interlaced_corridor_wedges"), "scale_on_terrain": 0.0},
     )
     lin_vel_dir_reward = RewTerm(func=mdp.lin_vel_dir_reward, weight=-0.5)
 
@@ -761,7 +761,7 @@ class RewardsCfg:
 
     corridor_centerline = RewTerm(
         func=mdp.corridor_centerline_exp,
-        weight=0.5,
+        weight=1.5,
         params={
             "std": 0.2,
             "terrain_types": ("interlaced_corridor_wedges",),
@@ -771,7 +771,7 @@ class RewardsCfg:
     )
     corridor_world_x_progress = RewTerm(
         func=mdp.corridor_world_x_progress_reward,
-        weight=0.3,
+        weight=1.0,
         params={
             "terrain_types": ("interlaced_corridor_wedges",),
             "safe_half_width_m": 0.7,
