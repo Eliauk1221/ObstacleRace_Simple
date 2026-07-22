@@ -41,7 +41,7 @@ from .custom_terrain import (
     HfDoubleFramePlatformTerrainCfg,
     HfSingleGapTerrainCfg,
     HfInterlacedCorridorWedgesTerrainCfg,
-    HfFigure8BridgeTerrainCfg,
+    HfSCurveTerrainCfg,
 )
 from .trimesh import ExternalMeshFromMetadataTerrainCfg
 
@@ -585,6 +585,9 @@ from .terrain_generator import FiledTerrainGenerator
 class FiledTerrainGeneratorCfg(TerrainGeneratorCfgBase):
     class_type: type = FiledTerrainGenerator
 
+    standard_feature_extent_m: float = 8.0
+    """Effective content side for generic terrains when the terrain cell is larger."""
+
 
 from isaaclab.terrains import FlatPatchSamplingCfg
 
@@ -599,18 +602,20 @@ _DEPTH6_FLAT_PATCH_TARGET = {
 # DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges + figure8_bridge
 DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     curriculum=True,
-    size=(8.0, 8.0),
+    size=(12.0, 12.0),
+    standard_feature_extent_m=8.0,
     border_width=20.0,
     num_rows=10,
     num_cols=10,
     horizontal_scale=0.05,
-    vertical_scale=0.01,
+    vertical_scale=0.005,
     slope_threshold=0.9,
     seed=42,
     use_cache=False,
     sub_terrains={
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
+            feature_extent_m=8.0,
             slope_range=(0.1, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -622,6 +627,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "noisy_slope_down": HfNoisyInvertedPyramidSlopedTerrainCfg(
             proportion=0.1,
+            feature_extent_m=8.0,
             slope_range=(0.15, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -633,6 +639,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "stairs_up": HfNoisyInvertedPyramidStairsTerrainCfg(
             proportion=0.1,
+            feature_extent_m=8.0,
             step_height_range=(0.05, 0.25),
             step_width_pixels_range=(10, 5),
             platform_width=2.0,
@@ -643,6 +650,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "stairs_down": HfNoisyPyramidStairsTerrainCfg(
             proportion=0.1,
+            feature_extent_m=8.0,
             step_height_range=(0.05, 0.25),
             step_width_pixels_range=(10, 5),
             platform_width=2.0,
@@ -653,6 +661,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "gap": HfMultiGapTerrainCfg(
             proportion=0.1,
+            feature_extent_m=8.0,
             gap_width_pixels_range=(3, 10),
             gap_depth_range=(0.2, 1.0),
             step_height_range=(0.03, 0.1),
@@ -670,16 +679,16 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             pattern_origin_x_m=-3.0,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        # "figure8_bridge": HfFigure8BridgeTerrainCfg(
-        #     proportion=0.2,
-        #     size=(12.0, 12.0),
-        #     inner_radius_m=2.5,
-        #     bridge_height=0.1,
-        #     bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
-        #     holes_depth=(0, 0),
-        #     center_cutout_width_m=0.8,
-        #     center_cutout_length_m=0.8,
-        # ),
+        "s_curve": HfSCurveTerrainCfg(
+            proportion=0.1,
+            size=(12.0, 12.0),
+            inner_radius_m=2.5,
+            bridge_height=0.1,
+            bridge_width_by_level=(0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
+            holes_depth=(-0.3, -0.5),
+            center_cutout_width_m=0.0,
+            center_cutout_length_m=0.0,
+        ),
     },
 )
 

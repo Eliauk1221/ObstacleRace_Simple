@@ -116,6 +116,26 @@ def _figure8_bridge_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, tor
     return inner_r, bridge_width_m, cutout_w, cutout_l
 
 
+def _s_curve_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, torch.Tensor]:
+    """读取 ``s_curve`` 当前课程等级的内缘半径和桥宽。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import bridge_width_for_runtime_terrain_levels
+
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get("s_curve")
+    if sub is None:
+        raise KeyError("s_curve sub_terrain not found in terrain_generator.sub_terrains")
+    widths = tuple(getattr(sub, "bridge_width_by_level", ()) or ())
+    if not widths:
+        raise ValueError("s_curve bridge_width_by_level must not be empty")
+    bridge_width_m = bridge_width_for_runtime_terrain_levels(
+        env.scene.terrain.terrain_levels,
+        int(getattr(terrain_gen_cfg, "num_rows", 1)),
+        widths,
+        getattr(terrain_gen_cfg, "difficulty_range", None),
+    )
+    return float(sub.inner_radius_m), bridge_width_m
+
+
 def figure8_bridge_fall_off(
     env: ManagerBasedRLEnv,
     terrain_types: list[str] | tuple[str, ...],
@@ -192,6 +212,60 @@ def figure8_bridge_fall_off(
     # Write back caches
     env.unwrapped.figure8_landed = landed
     env.unwrapped.figure8_root_z_at_landing = root_z0
+    return terminate
+
+
+def s_curve_fall_off(
+    env: ManagerBasedRLEnv,
+    terrain_types: list[str] | tuple[str, ...],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    ),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    contact_force_threshold: float = 0.5,
+    root_drop_threshold_m: float = 0.06,
+) -> torch.Tensor:
+    """S 弯桥：首次在有效半环带落地后，离桥或明显下沉即终止。"""
+    on_terrain = _figure8_on_terrain_mask(env, terrain_types)
+    if not on_terrain.any():
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import foot_xy_on_s_curve_torch
+
+    inner_radius_m, bridge_width_m = _s_curve_geometry_per_env(env)
+    device = env.device
+    if not hasattr(env.unwrapped, "s_curve_landed"):
+        env.unwrapped.s_curve_landed = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
+        env.unwrapped.s_curve_root_z_at_landing = torch.zeros(env.num_envs, dtype=torch.float, device=device)
+
+    landed: torch.Tensor = env.unwrapped.s_curve_landed
+    root_z0: torch.Tensor = env.unwrapped.s_curve_root_z_at_landing
+    episode_start = env.episode_length_buf == 0
+    landed = torch.where(episode_start, torch.zeros_like(landed), landed)
+    root_z0 = torch.where(episode_start, torch.zeros_like(root_z0), root_z0)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    foot_xy = asset.data.body_pos_w[:, asset_cfg.body_ids, :2] - env.scene.env_origins[:, None, :2]
+    left_on = foot_xy_on_s_curve_torch(foot_xy[:, 0], inner_radius_m, bridge_width_m)
+    right_on = foot_xy_on_s_curve_torch(foot_xy[:, 1], inner_radius_m, bridge_width_m)
+    any_on = left_on | right_on
+
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(torch.norm(net_contact_forces[:, :, contact_sensor_cfg.body_ids, :], dim=-1), dim=1)[0]
+        > float(contact_force_threshold)
+    )
+    just_landed = (~landed) & feet_contact.any(dim=1) & any_on & on_terrain
+    root_z_rel = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    root_z0 = torch.where(just_landed, root_z_rel, root_z0)
+    landed = landed | just_landed
+
+    leave_bridge = ~(left_on | right_on)
+    dropped = (root_z0 - root_z_rel) > float(root_drop_threshold_m)
+    terminate = landed & on_terrain & (leave_bridge | dropped)
+    env.unwrapped.s_curve_landed = landed
+    env.unwrapped.s_curve_root_z_at_landing = root_z0
     return terminate
 
 

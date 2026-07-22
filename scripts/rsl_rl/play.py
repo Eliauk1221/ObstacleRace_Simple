@@ -48,11 +48,11 @@ parser.add_argument(
         "",
         "interlaced_corridor_wedges",
         "figure8_bridge",
-        "figure8_s_bridge",
+        "s_curve",
     ],
     help=(
         "Single-cell demo terrain: interlaced_corridor_wedges (纵向交错交叉斜坡), "
-        "figure8_bridge (闭合 8 字桥), figure8_s_bridge (半 8 字 S 开口桥). "
+        "figure8_bridge (闭合 8 字桥), s_curve (半 8 字 S 开口桥). "
         "Empty string disables."
     ),
 )
@@ -378,18 +378,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         center_cutout_length_m=0.8,
                     )
                 }
-            elif st == "figure8_s_bridge":
+            elif st == "s_curve":
                 env_cfg.scene.terrain.terrain_generator.size = (12.0, 12.0)
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
-                    "figure8_s_bridge": terrain_gen.HfFigure8SCurveBridgeTerrainCfg(
+                    "s_curve": terrain_gen.HfSCurveTerrainCfg(
                         proportion=1.0,
                         size=(12.0, 12.0),
                         inner_radius_m=2.5,
                         bridge_height=0.1,
-                        bridge_width_by_level=(0.9, 0.8, 0.7, 0.6, 0.5),
-                        holes_depth=(0, 0),
-                        center_cutout_width_m=0.8,
-                        center_cutout_length_m=0.4,
+                        bridge_width_by_level=(0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
+                        holes_depth=(-0.3, -0.5),
+                        center_cutout_width_m=0.0,
+                        center_cutout_length_m=0.0,
                     )
                 }
 

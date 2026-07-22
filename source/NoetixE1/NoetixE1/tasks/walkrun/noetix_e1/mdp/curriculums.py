@@ -11,6 +11,7 @@ the curriculum introduced by the function.
 
 from __future__ import annotations
 
+import math
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -590,8 +591,17 @@ def _env_ids_on_terrain_types(
     positions = asset.data.root_link_pos_w[env_ids_tensor]
     return _check_terrain_types_from_positions(env, positions, terrain_types, col_indices=col_indices)
 
+
+def _standard_terrain_curriculum_half_extent(terrain_gen_cfg) -> float:
+    """Return the generic terrain's effective half-width for level-up distance."""
+    return 0.5 * float(getattr(terrain_gen_cfg, "standard_feature_extent_m", 8.0))
+
+
 def terrain_levels_vel_with_termination(
-    env: ManagerBasedRLEnv, env_ids: Sequence[int], asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    standard_terrain_curriculum_half_extent_m: float | None = None,
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
@@ -601,6 +611,11 @@ def terrain_levels_vel_with_termination(
     - move_up：沿 8 字中心线累计弧长 ≥ 单圆半周（``pi * r_c``）且未掉桥
     - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
+
+    **s_curve**
+    - move_up：沿开口 S 弯累计走过其总弧长的指定比例，且未掉桥
+    - move_down：仅 ``s_curve_fall_off``
+    - 弧长由 ``s_curve_path_progress_reward`` 写入 ``env.s_curve_episode_arc_m``
 
     **其它地形**
     - 有前进速度指令：原距离课程
@@ -625,6 +640,11 @@ def terrain_levels_vel_with_termination(
 
     # Get terrain configuration
     terrain_gen_cfg = terrain.cfg.terrain_generator
+    curriculum_half_extent = (
+        float(standard_terrain_curriculum_half_extent_m)
+        if standard_terrain_curriculum_half_extent_m is not None
+        else _standard_terrain_curriculum_half_extent(terrain_gen_cfg)
+    )
 
     # Initialize or update _adaptive_terrain_state if terrain generator supports it
     env_id_str = str(id(env))
@@ -663,7 +683,8 @@ def terrain_levels_vel_with_termination(
     move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
-    non_figure8 = ~is_figure8
+    is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, ("s_curve",))
+    other_terrain = ~(is_figure8 | is_s_curve)
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -691,13 +712,43 @@ def terrain_levels_vel_with_termination(
         move_up[f8_local] = arc_ok & ~fell_off
         move_down[f8_local] = fell_off
 
+    # S 弯：开口双半环总长 2*pi*r_c；默认要求正向完成 75%。
+    if is_s_curve.any():
+        sc_local = torch.where(is_s_curve)[0]
+        sc_env_ids = env_ids_tensor[sc_local]
+        fell_off = env.termination_manager.get_term("s_curve_fall_off")[sc_env_ids]
+
+        sc_sub = terrain_gen_cfg.sub_terrains.get("s_curve")
+        inner_r = float(getattr(sc_sub, "inner_radius_m", 2.5)) if sc_sub is not None else 2.5
+        widths = tuple(
+            getattr(sc_sub, "bridge_width_by_level", (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4))
+        )
+        success_arc_fraction = float(getattr(sc_sub, "curriculum_success_arc_fraction", 0.75))
+        from NoetixE1.terrains.custom_terrain.figure8_geometry import bridge_width_for_runtime_terrain_levels
+
+        bridge_width_m = bridge_width_for_runtime_terrain_levels(
+            terrain.terrain_levels[sc_env_ids],
+            int(terrain_gen_cfg.num_rows),
+            widths,
+            getattr(terrain_gen_cfg, "difficulty_range", None),
+        )
+        required_arc = 2.0 * math.pi * (inner_r + 0.5 * bridge_width_m) * success_arc_fraction
+        episode_arc = getattr(env.unwrapped, "s_curve_episode_arc_m", None)
+        if episode_arc is None:
+            arc_ok = torch.zeros(len(sc_local), dtype=torch.bool, device=env.device)
+        else:
+            arc_ok = episode_arc[sc_env_ids] >= required_arc
+
+        move_up[sc_local] = arc_ok & ~fell_off
+        move_down[sc_local] = fell_off
+
     # 其它地形：保留原距离 / 速度课程
-    if non_figure8.any():
-        nf_local = torch.where(non_figure8)[0]
+    if other_terrain.any():
+        nf_local = torch.where(other_terrain)[0]
         has_vel_mask = has_forward_velocity[nf_local]
         if has_vel_mask.any():
             sub = nf_local[torch.where(has_vel_mask)[0]]
-            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
+            move_up[sub] = distance[sub] > curriculum_half_extent
             move_down_temp = distance[sub] < command_vel_magnitude[sub] * env.max_episode_length_s * 0.5
             move_down_temp *= ~move_up[sub]
             move_down[sub] = move_down_temp
@@ -705,7 +756,7 @@ def terrain_levels_vel_with_termination(
         no_vel_mask = ~has_forward_velocity[nf_local]
         if no_vel_mask.any():
             sub = nf_local[torch.where(no_vel_mask)[0]]
-            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
+            move_up[sub] = distance[sub] > curriculum_half_extent
             sub_env_ids = env_ids_tensor[sub]
             fell_down = env.termination_manager.get_term("fall_down_in_some_terrain")[sub_env_ids]
             move_down[sub] = fell_down

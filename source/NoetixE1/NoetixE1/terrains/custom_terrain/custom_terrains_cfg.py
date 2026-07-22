@@ -13,7 +13,15 @@ from isaaclab.terrains.height_field.hf_terrains_cfg import HfTerrainBaseCfg
 
 
 @configclass
-class HfNoisyPyramidSlopedTerrainCfg(HfTerrainBaseCfg):
+class HfFeatureExtentCfg:
+    """Restrict the generated feature to a centered square within a larger terrain cell."""
+
+    feature_extent_m: float | None = None
+    """Effective feature side length in meters; ``None`` uses the full terrain cell."""
+
+
+@configclass
+class HfNoisyPyramidSlopedTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
     """Configuration for a pyramid sloped height field terrain with noise."""
 
     function = custom_terrains.noisy_pyramid_sloped_terrain
@@ -71,7 +79,7 @@ class HfNoisyInvertedPyramidSlopedTerrainCfg(HfNoisyPyramidSlopedTerrainCfg):
 
 
 @configclass
-class HfNoisyPyramidStairsTerrainCfg(HfTerrainBaseCfg):
+class HfNoisyPyramidStairsTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
     """Configuration for a pyramid stair height field terrain with noise."""
 
     function = custom_terrains.noisy_pyramid_stairs_terrain
@@ -134,7 +142,7 @@ class HfNoisyInvertedPyramidStairsTerrainCfg(HfNoisyPyramidStairsTerrainCfg):
 
 
 @configclass
-class HfMultiGapTerrainCfg(HfTerrainBaseCfg):
+class HfMultiGapTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
     """Configuration for a height field terrain with nested "回字形" (ring-shaped) gaps of configurable depth.
 
     Creates nested ring-shaped gap structures (一环套一环). The structure from outside to inside:
@@ -435,9 +443,8 @@ class HfFigure8BridgeTerrainCfg(HfTerrainBaseCfg):
     center_cutout_length_m: float = 0.0
     """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
 
-
 @configclass
-class HfFigure8SCurveBridgeTerrainCfg(HfTerrainBaseCfg):
+class HfSCurveTerrainCfg(HfTerrainBaseCfg):
     """半 8 字 → S 形开口桥：在 :class:`HfFigure8BridgeTerrainCfg` 的双圆环带基础上，仅保留一半环带形成 S 形通道。
 
     约定（env 局部系，原点为几何中心）：
@@ -446,7 +453,7 @@ class HfFigure8SCurveBridgeTerrainCfg(HfTerrainBaseCfg):
     - 其余逻辑（坑底、桥面高度、桥宽难度映射、软边）与 figure8_bridge 保持一致
     """
 
-    function = custom_terrains.figure8_s_curve_bridge_terrain
+    function = custom_terrains.s_curve_terrain
 
     size: tuple[float, float] = (12.0, 12.0)
     """单格场地边长（米）。"""
@@ -460,8 +467,8 @@ class HfFigure8SCurveBridgeTerrainCfg(HfTerrainBaseCfg):
     bridge_width_range: tuple[float, float] = (0.8, 0.45)
     """兼容旧逻辑：未设置 ``bridge_width_by_level`` 时在 ``[0]`` 与 ``[1]`` 间线性插值。"""
 
-    bridge_width_by_level: tuple[float, ...] = (0.8, 0.7, 0.6, 0.5, 0.45)
-    """离散等级桥宽（米）：由 difficulty 映射到索引。"""
+    bridge_width_by_level: tuple[float, ...] = (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4)
+    """离散等级桥宽（米）：与 ``num_rows=10`` 对齐，level 0→0.85 … level 9→0.4。"""
 
     holes_depth: tuple[float, float] = (-0.3, -0.5)
     """坑底深度（米，负值）；随 difficulty 插值。"""
@@ -477,3 +484,6 @@ class HfFigure8SCurveBridgeTerrainCfg(HfTerrainBaseCfg):
 
     center_cutout_length_m: float = 0.0
     """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
+
+    curriculum_success_arc_fraction: float = 0.75
+    """课程升档所需完成的 S 弯总弧长比例；默认要求正向走过 75%。"""

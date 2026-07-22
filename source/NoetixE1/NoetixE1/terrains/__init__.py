@@ -8,7 +8,7 @@ from .terrain_generator_cfg import *
 from .custom_terrain import (
     HfDoubleFramePlatformTerrainCfg,
     HfFigure8BridgeTerrainCfg,
-    HfFigure8SCurveBridgeTerrainCfg,
+    HfSCurveTerrainCfg,
     HfHurdleTerrainCfg,
     HfInterlacedCorridorWedgesTerrainCfg,
     HfMultiGapTerrainCfg,

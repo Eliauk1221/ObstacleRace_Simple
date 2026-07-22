@@ -264,6 +264,12 @@ class CommandsCfg:
                 ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.5, 0.9, 0.5],
             ),
+            "s_curve": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.0, 1.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.5, 0.9, 0.5],
+            ),
         },
     )
 
@@ -597,6 +603,11 @@ class EventCfg:
             "terrain_specific_spawn_z_offset": {
                 "interlaced_corridor_wedges": -0.2,
             },
+            "terrain_specific_s_curve_spawn": {
+                "path_fraction_range": (0.02, 0.15),
+                "bridge_height": 0.1,
+                "position_noise": 0.0,
+            },
         },
     )
 
@@ -715,19 +726,25 @@ class RewardsCfg:
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_world_exp,
         weight=1.0,
-        params={"std": 0.5, "skip_terrain_types": ("figure8_bridge", "interlaced_corridor_wedges")},
+        params={
+            "std": 0.5,
+            "skip_terrain_types": ("figure8_bridge", "s_curve", "interlaced_corridor_wedges"),
+        },
     )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
-        params={"terrain_types": ("figure8_bridge", "interlaced_corridor_wedges"), "scale_on_terrain": 0.0},
+        params={
+            "terrain_types": ("figure8_bridge", "s_curve", "interlaced_corridor_wedges"),
+            "scale_on_terrain": 0.0,
+        },
     )
     lin_vel_dir_reward = RewTerm(func=mdp.lin_vel_dir_reward, weight=-0.5)
 
     # ------------------------------------------- figure8_bridge -------------------------------------------
     figure8_commanded_idle = RewTerm(
-        func=mdp.figure8_bridge_commanded_idle_penalty,
+        func=mdp.bridge_commanded_idle_penalty,
         weight=-1.0,
         params={
             "terrain_types": ("figure8_bridge",),
@@ -757,6 +774,60 @@ class RewardsCfg:
         },
     )
 
+    # ------------------------------------------- s_curve -------------------------------------------
+    s_curve_commanded_idle = RewTerm(
+        func=mdp.bridge_commanded_idle_penalty,
+        weight=-1.0,
+        params={
+            "terrain_types": ("s_curve",),
+            "min_cmd_speed": 0.15,
+            "min_body_speed": 0.08,
+        },
+    )
+    s_curve_lateral_offset = RewTerm(
+        func=mdp.s_curve_lateral_offset_penalty,
+        weight=-1.0,
+        params={
+            "terrain_types": ("s_curve",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "edge_buffer_m": 0.05,
+        },
+    )
+    s_curve_path_forward = RewTerm(
+        func=mdp.s_curve_path_forward_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("s_curve",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "std": 0.25,
+            "min_cmd_speed": 0.1,
+        },
+    )
+    s_curve_path_progress = RewTerm(
+        func=mdp.s_curve_path_progress_reward,
+        weight=1.0,
+        params={
+            "terrain_types": ("s_curve",),
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "min_v_along": 0.05,
+            "progress_scale": 1.0,
+        },
+    )
+    s_curve_feet_impact = RewTerm(
+        func=mdp.feet_impact,
+        weight=-10.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "terrain_types": ("s_curve",),
+        },
+    )
+
     # ------------------------------------------- interlaced_corridor_wedges -------------------------------------------
 
     corridor_centerline = RewTerm(
@@ -771,7 +842,7 @@ class RewardsCfg:
     )
     corridor_world_x_progress = RewTerm(
         func=mdp.corridor_world_x_progress_reward,
-        weight=1.0,
+        weight=0.3,
         params={
             "terrain_types": ("interlaced_corridor_wedges",),
             "safe_half_width_m": 0.7,
@@ -816,7 +887,7 @@ class RewardsCfg:
         weight=-3.,
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "skip_terrain_types": ("figure8_bridge",),
+            "skip_terrain_types": ("figure8_bridge", "s_curve"),
         },
     )
     feet_air_time = RewTerm(
@@ -1027,6 +1098,15 @@ class TerminationsCfg:
             "root_drop_threshold_m": 0.06,
         },
     )
+    s_curve_fall_off = DoneTerm(
+        func=mdp.s_curve_fall_off,
+        params={
+            "terrain_types": ["s_curve"],
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "contact_force_threshold": 0.5,
+            "root_drop_threshold_m": 0.06,
+        },
+    )
     # (5) Out of Bounds
     terrain_out_of_bounds = DoneTerm(func=mdp.terrain_out_of_bounds, time_out=True, params={"distance_buffer": 2.0})
 
@@ -1075,6 +1155,9 @@ class WalkRunDepthEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+        # A 12 m terrain grid has 2.25x the height-field triangles of the former 8 m grid.
+        # Keep the larger collision stack local to this dense WalkRun environment.
+        self.sim.physx.gpu_collision_stack_size = 2**27
 
         # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)

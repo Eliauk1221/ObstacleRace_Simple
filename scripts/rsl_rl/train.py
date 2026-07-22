@@ -27,6 +27,19 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--showcase_terrain",
+    type=str,
+    default="",
+    choices=["", "s_curve"],
+    help="Force the S-curve bridge as the only training sub-terrain.",
+)
+parser.add_argument(
+    "--showcase_difficulty",
+    type=float,
+    default=None,
+    help="Fix S-curve showcase difficulty (0.0-1.0); omit it to use the 10-level S-curve curriculum.",
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
@@ -77,6 +90,7 @@ from datetime import datetime
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
 import NoetixE1.tasks  # noqa: F401
+import NoetixE1.terrains as terrain_gen
 import omni
 import torch
 from isaaclab.envs import (
@@ -88,6 +102,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
+from isaaclab.terrains import FlatPatchSamplingCfg
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -98,6 +113,47 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def _flat_patch_target_for_pose_command():
+    return {
+        "target": FlatPatchSamplingCfg(
+            num_patches=50,
+            patch_radius=[0.05, 0.10, 0.15, 0.20],
+            max_height_diff=0.05,
+        ),
+    }
+
+
+def _apply_s_curve_showcase(env_cfg, difficulty: float | None) -> None:
+    """Replace the default generator with one continuous S bridge for dedicated training."""
+    if env_cfg.scene.terrain.terrain_type != "generator":
+        return
+    if difficulty is not None and not 0.0 <= difficulty <= 1.0:
+        raise ValueError("--showcase_difficulty must be within [0.0, 1.0].")
+
+    generator = env_cfg.scene.terrain.terrain_generator
+    generator.num_rows = 1 if difficulty is not None else 10
+    generator.num_cols = 1
+    generator.curriculum = difficulty is None
+    if difficulty is not None:
+        generator.difficulty_range = (difficulty, difficulty)
+    generator.size = (12.0, 12.0)
+    generator.sub_terrains = {
+        "s_curve": terrain_gen.HfSCurveTerrainCfg(
+            proportion=1.0,
+            size=(12.0, 12.0),
+            inner_radius_m=2.5,
+            bridge_height=0.1,
+            bridge_width_by_level=(0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
+            holes_depth=(-0.3, -0.5),
+            center_cutout_width_m=0.0,
+            center_cutout_length_m=0.0,
+            flat_patch_sampling=_flat_patch_target_for_pose_command(),
+        )
+    }
+    mode = f"fixed difficulty={difficulty}" if difficulty is not None else "10-level curriculum"
+    print(f"[INFO] S-curve showcase training: {mode}")
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -114,6 +170,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if args_cli.showcase_terrain == "s_curve":
+        _apply_s_curve_showcase(env_cfg, args_cli.showcase_difficulty)
 
     # multi-gpu training configuration
     if args_cli.distributed:

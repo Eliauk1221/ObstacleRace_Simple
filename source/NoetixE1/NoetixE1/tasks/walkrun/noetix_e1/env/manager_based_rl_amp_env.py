@@ -446,6 +446,17 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
             self._reset_idx(reset_env_ids)
             # reset buffer
             self.feet_both_contact_time[reset_env_ids] = 0.0
+            # S 弯的延迟初始化状态不能跨 episode 保留。
+            if hasattr(self, "s_curve_landed"):
+                self.s_curve_landed[reset_env_ids] = False
+            if hasattr(self, "s_curve_root_z_at_landing"):
+                self.s_curve_root_z_at_landing[reset_env_ids] = 0.0
+            if hasattr(self, "s_curve_episode_arc_m"):
+                self.s_curve_episode_arc_m[reset_env_ids] = 0.0
+            if hasattr(self, "s_curve_prev_path_fraction"):
+                self.s_curve_prev_path_fraction[reset_env_ids] = 0.0
+            if hasattr(self, "s_curve_prev_path_valid"):
+                self.s_curve_prev_path_valid[reset_env_ids] = False
             # update articulation kinematics
             self.scene.write_data_to_sim()
             self.sim.forward()

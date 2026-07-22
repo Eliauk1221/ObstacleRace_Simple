@@ -968,17 +968,88 @@ def _figure8_foot_perception(
     return left_on, right_on, both_on_bridge, foot_center_xy, feet_contact
 
 
-def figure8_bridge_commanded_idle_penalty(
+def _s_curve_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, torch.Tensor]:
+    """读取 S 弯当前课程等级的桥面几何参数。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import bridge_width_for_runtime_terrain_levels
+
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get("s_curve")
+    if sub is None:
+        raise KeyError("s_curve sub_terrain not found in terrain_generator.sub_terrains")
+    widths = tuple(getattr(sub, "bridge_width_by_level", ()) or ())
+    if not widths:
+        raise ValueError("s_curve bridge_width_by_level must not be empty")
+    bridge_width_m = bridge_width_for_runtime_terrain_levels(
+        env.scene.terrain.terrain_levels,
+        int(getattr(terrain_gen_cfg, "num_rows", 1)),
+        widths,
+        getattr(terrain_gen_cfg, "difficulty_range", None),
+    )
+    return float(sub.inner_radius_m), bridge_width_m
+
+
+def _s_curve_foot_perception(
+    env: ManagerBasedRLEnv,
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    contact_force_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """S 弯脚底感知，使用与高度场一致的半环带有效支撑判定。"""
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import foot_xy_on_s_curve_torch
+
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(torch.norm(net_contact_forces[:, :, contact_sensor_cfg.body_ids, :], dim=-1), dim=1)[0]
+        > contact_force_threshold
+    )
+    origins_xy = env.scene.env_origins[:, :2]
+    left_scanner: RayCaster = env.scene.sensors[left_foot_height_scanner_cfg.name]
+    right_scanner: RayCaster = env.scene.sensors[right_foot_height_scanner_cfg.name]
+    left_xy = left_scanner.data.pos_w[:, :2] - origins_xy
+    right_xy = right_scanner.data.pos_w[:, :2] - origins_xy
+    inner_r, bridge_width_m = _s_curve_geometry_per_env(env)
+    left_on = foot_xy_on_s_curve_torch(left_xy, inner_r, bridge_width_m)
+    right_on = foot_xy_on_s_curve_torch(right_xy, inner_r, bridge_width_m)
+    return left_on, right_on, left_on & right_on, 0.5 * (left_xy + right_xy), feet_contact
+
+
+def _s_curve_path_geometry(
+    xy: torch.Tensor, inner_radius_m: float, bridge_width_m: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """S 弯中心线投影：返回路径分数、正向切线和径向横向偏差。
+
+    路径方向固定为左端 -> 左上半环 -> 原点 -> 右下半环 -> 右端。该解析式
+    按环境实际桥宽计算，不会因课程等级不同而复用错误半径的离散折线。
+    """
+    r_c = float(inner_radius_m) + 0.5 * bridge_width_m
+    on_left_arc = (xy[:, 1] > 0.0) | ((xy[:, 1].abs() <= 1e-6) & (xy[:, 0] <= 0.0))
+    dx = torch.where(on_left_arc, xy[:, 0] + r_c, xy[:, 0] - r_c)
+    theta = torch.atan2(xy[:, 1], dx)
+    right_theta = torch.where(theta > 0.0, theta - 2.0 * math.pi, theta)
+    path_fraction = torch.where(
+        on_left_arc,
+        (math.pi - theta) / (2.0 * math.pi),
+        0.5 + (right_theta + math.pi) / (2.0 * math.pi),
+    ).clamp(0.0, 1.0)
+    tangent_x = torch.where(on_left_arc, torch.sin(theta), -torch.sin(right_theta))
+    tangent_y = torch.where(on_left_arc, -torch.cos(theta), torch.cos(right_theta))
+    tangent = torch.stack([tangent_x, tangent_y], dim=1)
+    tangent = tangent / torch.norm(tangent, dim=1, keepdim=True).clamp(min=1e-8)
+    radial_distance = torch.hypot(dx, xy[:, 1])
+    lateral_offset = torch.abs(radial_distance - r_c)
+    return path_fraction, tangent, lateral_offset
+
+
+def bridge_commanded_idle_penalty(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...],
     min_cmd_speed: float = 0.15,
     min_body_speed: float = 0.08,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """有前进指令但机身几乎不动时惩罚（防在 8 字桥上蹲着刷分）。
-
-    全局 ``low_speed_reward`` 主要奖励跟速；该项为 8 字专用、仅在有指令且速度过低时给正惩罚量。
-    """
+    """有前进指令但机身几乎不动时惩罚，供窄桥类地形复用。"""
     device = env.device
     mask = _terrain_type_mask(env, terrain_types, device)
     if not mask.any():
@@ -1267,3 +1338,134 @@ def figure8_bridge_path_progress_reward(
         mask, torch.ones_like(prev_valid) | reset, prev_valid
     )
     return reward
+
+
+def s_curve_path_forward_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    std: float = 0.25,
+    min_cmd_speed: float = 0.1,
+    contact_force_threshold: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """奖励沿 S 弯正向中心线的速度，抑制反向绕行或横向抄近路。"""
+    mask = _terrain_type_mask(env, terrain_types, env.device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    _, _, both_on, foot_xy, _ = _s_curve_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+    )
+    inner_r, bridge_width_m = _s_curve_geometry_per_env(env)
+    _, tangent, _ = _s_curve_path_geometry(foot_xy, inner_r, bridge_width_m)
+    asset: Articulation = env.scene[asset_cfg.name]
+    v_along = (asset.data.root_lin_vel_w[:, :2] * tangent).sum(dim=1)
+    command = env.command_manager.get_command("base_velocity")
+    cmd_speed = torch.norm(command[:, :2], dim=1)
+    reward = torch.exp(-torch.square(v_along - cmd_speed) / (float(std) ** 2))
+    return reward * both_on.float() * (cmd_speed > float(min_cmd_speed)).float() * mask.float()
+
+
+def s_curve_lateral_offset_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    edge_buffer_m: float = 0.05,
+    contact_force_threshold: float = 0.5,
+) -> torch.Tensor:
+    """惩罚 S 弯桥面上接触脚接近内、外缘，半环选择与地形一致。"""
+    mask = _terrain_type_mask(env, terrain_types, env.device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    left_on, right_on, _, _, feet_contact = _s_curve_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+    )
+    origins_xy = env.scene.env_origins[:, :2]
+    left_scanner: RayCaster = env.scene.sensors[left_foot_height_scanner_cfg.name]
+    right_scanner: RayCaster = env.scene.sensors[right_foot_height_scanner_cfg.name]
+    feet_xy = torch.stack(
+        [
+            left_scanner.data.pos_w[:, :2] - origins_xy,
+            right_scanner.data.pos_w[:, :2] - origins_xy,
+        ],
+        dim=1,
+    )
+    inner_r, bridge_width_m = _s_curve_geometry_per_env(env)
+    r_c = float(inner_r) + 0.5 * bridge_width_m
+    on_left_arc = (feet_xy[..., 1] > 0.0) | (
+        (feet_xy[..., 1].abs() <= 1e-6) & (feet_xy[..., 0] <= 0.0)
+    )
+    center_dx = torch.where(
+        on_left_arc, feet_xy[..., 0] + r_c.unsqueeze(1), feet_xy[..., 0] - r_c.unsqueeze(1)
+    )
+    radial_distance = torch.hypot(center_dx, feet_xy[..., 1])
+    margin = 0.5 * bridge_width_m.unsqueeze(1) - torch.abs(radial_distance - r_c.unsqueeze(1))
+    near_edge = torch.clamp(float(edge_buffer_m) - margin, min=0.0) / max(float(edge_buffer_m), 1e-6)
+    on_bridge = torch.stack([left_on, right_on], dim=1)
+    per_foot_penalty = near_edge.square() * on_bridge.float() * feet_contact.float()
+    return per_foot_penalty.sum(dim=1) * mask.float()
+
+
+def s_curve_path_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    contact_sensor_cfg: SceneEntityCfg,
+    left_foot_height_scanner_cfg: SceneEntityCfg,
+    right_foot_height_scanner_cfg: SceneEntityCfg,
+    min_v_along: float = 0.05,
+    progress_scale: float = 1.0,
+    contact_force_threshold: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """累计 S 弯开口路径的正向弧长，并将其写入课程状态。"""
+    mask = _terrain_type_mask(env, terrain_types, env.device)
+    if not mask.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    if not hasattr(env.unwrapped, "s_curve_prev_path_fraction"):
+        env.unwrapped.s_curve_prev_path_fraction = torch.zeros(env.num_envs, device=env.device)
+        env.unwrapped.s_curve_prev_path_valid = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env.unwrapped.s_curve_episode_arc_m = torch.zeros(env.num_envs, device=env.device)
+
+    _, _, both_on, foot_xy, _ = _s_curve_foot_perception(
+        env,
+        contact_sensor_cfg,
+        left_foot_height_scanner_cfg,
+        right_foot_height_scanner_cfg,
+        contact_force_threshold,
+    )
+    inner_r, bridge_width_m = _s_curve_geometry_per_env(env)
+    path_fraction, tangent, _ = _s_curve_path_geometry(foot_xy, inner_r, bridge_width_m)
+    asset: Articulation = env.scene[asset_cfg.name]
+    v_along = (asset.data.root_lin_vel_w[:, :2] * tangent).sum(dim=1)
+
+    prev_fraction = env.unwrapped.s_curve_prev_path_fraction
+    prev_valid = env.unwrapped.s_curve_prev_path_valid
+    reset = env.episode_length_buf == 0
+    prev_fraction = torch.where(reset, path_fraction, prev_fraction)
+    prev_valid = torch.where(reset, torch.zeros_like(prev_valid), prev_valid)
+    arc_total = 2.0 * math.pi * (float(inner_r) + 0.5 * bridge_width_m)
+    arc_increment = torch.clamp(path_fraction - prev_fraction, min=0.0) * arc_total
+    moving = v_along > float(min_v_along)
+    valid_step = both_on & moving & prev_valid & mask
+    arc_increment = arc_increment * valid_step.float()
+
+    episode_arc = torch.where(reset, torch.zeros_like(env.unwrapped.s_curve_episode_arc_m), env.unwrapped.s_curve_episode_arc_m)
+    env.unwrapped.s_curve_episode_arc_m = episode_arc + arc_increment
+    env.unwrapped.s_curve_prev_path_fraction = torch.where(mask, path_fraction, prev_fraction)
+    env.unwrapped.s_curve_prev_path_valid = torch.where(mask, torch.ones_like(prev_valid), prev_valid)
+    return arc_increment * float(progress_scale)

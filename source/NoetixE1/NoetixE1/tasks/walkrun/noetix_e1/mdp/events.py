@@ -144,6 +144,90 @@ def _figure8_spawn_cfg_active(figure8_spawn_cfg: dict | None) -> bool:
     return bool(figure8_spawn_cfg.get("path_loop_ranges"))
 
 
+def _s_curve_spawn_cfg_active(s_curve_spawn_cfg: dict | None) -> bool:
+    """S 弯只支持在桥面路径上出生，避免从坑底或无效半环开始 episode。"""
+    return s_curve_spawn_cfg is not None and "path_fraction_range" in s_curve_spawn_cfg
+
+
+def _apply_s_curve_spawn_to_rand_samples(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    rand_samples: torch.Tensor,
+    terrain_types_for_envs: torch.Tensor,
+    terrain_type_names_to_col_map: dict[str, list[int]],
+    s_curve_spawn_cfg: dict,
+) -> None:
+    """在每个 S 弯当前难度对应的桥面中心线上采样 x、y、yaw。"""
+    terrain_name = "s_curve"
+    if terrain_name not in terrain_type_names_to_col_map:
+        return
+
+    is_s_curve = _terrain_env_mask(
+        terrain_types_for_envs, terrain_type_names_to_col_map[terrain_name], len(env_ids), env.device
+    )
+    if not is_s_curve.any():
+        return
+
+    from NoetixE1.terrains.custom_terrain.figure8_geometry import (
+        bridge_width_for_runtime_terrain_levels,
+        sample_s_curve_path_spawn_xy_yaw,
+    )
+
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get(terrain_name)
+    if sub is None:
+        raise KeyError(f"{terrain_name} sub_terrain not found in terrain_generator.sub_terrains")
+    widths = tuple(getattr(sub, "bridge_width_by_level", ()) or ())
+    if not widths:
+        raise ValueError(f"{terrain_name} bridge_width_by_level must not be empty")
+
+    matched_env_ids = env_ids[is_s_curve]
+    bridge_width_m = bridge_width_for_runtime_terrain_levels(
+        env.scene.terrain.terrain_levels[matched_env_ids],
+        int(terrain_gen_cfg.num_rows),
+        widths,
+        getattr(terrain_gen_cfg, "difficulty_range", None),
+    )
+    x, y, yaw = sample_s_curve_path_spawn_xy_yaw(
+        int(is_s_curve.sum().item()),
+        env.device,
+        float(getattr(sub, "inner_radius_m", 2.5)),
+        bridge_width_m,
+        tuple(s_curve_spawn_cfg["path_fraction_range"]),
+        float(s_curve_spawn_cfg.get("position_noise", 0.0)),
+    )
+    rand_samples[is_s_curve, 0] = x
+    rand_samples[is_s_curve, 1] = y
+    rand_samples[is_s_curve, 5] = yaw
+
+
+def _write_s_curve_root_pose_from_spawn(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    positions: torch.Tensor,
+    orientations: torch.Tensor,
+    rand_samples: torch.Tensor,
+    is_s_curve: torch.Tensor,
+    s_curve_spawn_cfg: dict,
+    default_root_z: float,
+) -> None:
+    """将 S 弯环境的根状态写到桥面中心线采样点，覆盖 AMP 参考根位姿。"""
+    if not is_s_curve.any():
+        return
+    origins = env.scene.env_origins[env_ids]
+    positions[is_s_curve, 0] = origins[is_s_curve, 0] + rand_samples[is_s_curve, 0]
+    positions[is_s_curve, 1] = origins[is_s_curve, 1] + rand_samples[is_s_curve, 1]
+    positions[is_s_curve, 2] = (
+        origins[is_s_curve, 2]
+        + float(default_root_z)
+        + float(s_curve_spawn_cfg.get("bridge_height", 0.1))
+    )
+    n = int(is_s_curve.sum().item())
+    roll = torch.zeros(n, device=env.device)
+    pitch = torch.zeros(n, device=env.device)
+    orientations[is_s_curve] = math_utils.quat_from_euler_xyz(roll, pitch, rand_samples[is_s_curve, 5])
+
+
 def _write_figure8_root_pose_from_spawn(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -218,6 +302,7 @@ def reset_root_state_amp(
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
     terrain_specific_spawn_z_offset: dict[str, float] | None = None,
     terrain_specific_figure8_spawn: dict | None = None,
+    terrain_specific_s_curve_spawn: dict | None = None,
 ):
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
@@ -321,6 +406,22 @@ def reset_root_state_amp(
                 # Replace x, y in rand_samples
                 rand_samples[:, 0] = x_samples
                 rand_samples[:, 1] = y_samples
+
+    if _s_curve_spawn_cfg_active(terrain_specific_s_curve_spawn):
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
+
+        _apply_s_curve_spawn_to_rand_samples(
+            env,
+            env_ids,
+            rand_samples,
+            env.scene.terrain.terrain_types[env_ids],
+            get_terrain_type_names_to_col_map(env),
+            terrain_specific_s_curve_spawn,
+        )
+
+    # The non-AMP path reuses ``rand_samples`` for root velocities below. Preserve the
+    # S-curve pose samples so its later root-pose override never reads velocity noise.
+    s_curve_pose_samples = rand_samples
 
     if (
         env.unwrapped.motion_loader is not None
@@ -499,6 +600,29 @@ def reset_root_state_amp(
         # bias these values randomly
         joint_pos += math_utils.sample_uniform(*joint_pos_range, joint_pos.shape, joint_pos.device)
         joint_vel += math_utils.sample_uniform(*joint_vel_range, joint_vel.shape, joint_vel.device)
+
+    if _s_curve_spawn_cfg_active(terrain_specific_s_curve_spawn):
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
+
+        terrain_type_names_to_col_map = get_terrain_type_names_to_col_map(env)
+        terrain_name = "s_curve"
+        if terrain_name in terrain_type_names_to_col_map:
+            is_s_curve = _terrain_env_mask(
+                env.scene.terrain.terrain_types[env_ids],
+                terrain_type_names_to_col_map[terrain_name],
+                len(env_ids),
+                asset.device,
+            )
+            _write_s_curve_root_pose_from_spawn(
+                env,
+                env_ids,
+                positions,
+                orientations,
+                s_curve_pose_samples,
+                is_s_curve,
+                terrain_specific_s_curve_spawn,
+                float(asset.data.default_root_state[0, 2].item()),
+            )
 
     _apply_terrain_specific_spawn_z_offset(
         env, env_ids, positions, terrain_specific_spawn_z_offset, asset.device
