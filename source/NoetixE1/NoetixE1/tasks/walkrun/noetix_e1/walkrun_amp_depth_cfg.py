@@ -1029,7 +1029,7 @@ class RewardsCfg:
 
     feet_too_near = RewTerm(
         func=mdp.feet_too_near_humanoid_xy,
-        weight=-1.5,
+        weight=-10.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*_ankle_roll_link"]), "threshold": 0.15},
     )
     # 梅花桩等地形上、x 指令 > 0.3 且两脚都接触时惩罚两脚过近，鼓励每脚一桩
