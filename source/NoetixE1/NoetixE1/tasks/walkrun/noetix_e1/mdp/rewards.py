@@ -761,6 +761,46 @@ def corridor_world_x_progress_reward(
     return forward_speed * active.float()
 
 
+def corridor_lateral_threshold_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    penalty_threshold: float,
+    penalty_limit: float,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Return a smooth lateral penalty outside a corridor's safe center band.
+
+    The raw penalty is zero up to ``penalty_threshold``, rises quadratically to
+    one at ``penalty_limit``, and remains one outside the corridor. The caller
+    supplies a negative reward weight.
+    """
+    if penalty_threshold < 0.0:
+        raise ValueError(f"penalty_threshold must be non-negative, got {penalty_threshold}.")
+    if penalty_limit <= penalty_threshold:
+        raise ValueError(
+            f"penalty_limit must exceed penalty_threshold, got {penalty_limit} <= {penalty_threshold}."
+        )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    local_y = local_xy[:, 1]
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    normalized_excess = (
+        (torch.abs(local_y) - float(penalty_threshold))
+        / float(penalty_limit - penalty_threshold)
+    ).clamp(min=0.0, max=1.0)
+    return torch.square(normalized_excess) * active.float()
+
+
 def interlaced_corridor_ramp_step_up_lift_reward(
     env: ManagerBasedRLEnv,
     contact_sensor_cfg: SceneEntityCfg,
@@ -771,6 +811,8 @@ def interlaced_corridor_ramp_step_up_lift_reward(
     std: float = 0.05,
     x_range: tuple[float, float] = (-3.4, -2.8),
     min_forward_command: float = 0.3,
+    min_episode_length: int = 0,
+    max_abs_local_y: float | None = None,
     terrain_types: tuple[str, ...] = ("interlaced_corridor_wedges",),
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
@@ -782,6 +824,7 @@ def interlaced_corridor_ramp_step_up_lift_reward(
     - forward command is non-zero (cmd_x > min_forward_command)
     - local_x is within x_range (near the ramp ledge)
     - the corresponding foot is not in contact (swing foot)
+    - optional reset-step and lateral-band gates are satisfied
     """
     asset: Articulation = env.scene[asset_cfg.name]
 
@@ -799,11 +842,18 @@ def interlaced_corridor_ramp_step_up_lift_reward(
     # local_x in terrain-cell frame
     local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
     local_x = local_xy[:, 0]
+    local_y = local_xy[:, 1]
 
     command = env.command_manager.get_command("base_velocity")
     cmd_x = command[:, 0] if command.dim() > 1 else command
     x_lo, x_hi = x_range
     active = is_desired_terrain & (cmd_x > min_forward_command) & (local_x >= x_lo) & (local_x <= x_hi)
+    if min_episode_length > 0:
+        active &= env.episode_length_buf >= int(min_episode_length)
+    if max_abs_local_y is not None:
+        if max_abs_local_y <= 0.0:
+            raise ValueError(f"max_abs_local_y must be positive, got {max_abs_local_y}.")
+        active &= torch.abs(local_y) <= float(max_abs_local_y)
 
     # Foot contact -> swing mask
     contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]

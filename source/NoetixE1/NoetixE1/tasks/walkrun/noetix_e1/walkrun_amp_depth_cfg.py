@@ -937,7 +937,7 @@ class RewardsCfg:
     )
     approach_interlaced_ramp_step_up_lift = RewTerm(
         func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
-        weight=6,
+        weight=3.0,
         params={
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
@@ -947,7 +947,20 @@ class RewardsCfg:
             "std": 0.05,
             "x_range": (-3.4, -2.8),
             "min_forward_command": 0.3,
+            "min_episode_length": 10,
+            "max_abs_local_y": 1.2,
             "terrain_types": ("interlaced_corridor_wedges_approach",),
+        },
+    )
+    approach_corridor_lateral_threshold = RewTerm(
+        func=mdp.corridor_lateral_threshold_penalty,
+        weight=-3.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "penalty_threshold": 0.85,
+            "penalty_limit": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, 3.0),
         },
     )
     # ------------------------------------------------- Base --------------------------------------------------
