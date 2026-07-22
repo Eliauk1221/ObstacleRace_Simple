@@ -684,7 +684,10 @@ def terrain_levels_vel_with_termination(
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, ("s_curve",))
-    other_terrain = ~(is_figure8 | is_s_curve)
+    is_interlaced_approach = _env_ids_on_terrain_types(
+        env, env_ids_tensor, ("interlaced_corridor_wedges_approach",)
+    )
+    other_terrain = ~(is_figure8 | is_s_curve | is_interlaced_approach)
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -741,6 +744,20 @@ def terrain_levels_vel_with_termination(
 
         move_up[sc_local] = arc_ok & ~fell_off
         move_down[sc_local] = fell_off
+
+    # 坡前出生不能使用相对 terrain origin 的欧氏距离：初始 x 已接近 -4 m。
+    # 仅在走到四段走廊末端时升档；有前进指令却仍停在入口前则降档。
+    if is_interlaced_approach.any():
+        approach_local = torch.where(is_interlaced_approach)[0]
+        approach_env_ids = env_ids_tensor[approach_local]
+        local_x = asset.data.root_pos_w[approach_env_ids, 0] - env.scene.env_origins[approach_env_ids, 0]
+        reached_corridor_end = local_x >= 2.5
+        stayed_before_entry = local_x <= -3.0
+
+        move_up[approach_local] = reached_corridor_end
+        move_down[approach_local] = (
+            stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end
+        )
 
     # 其它地形：保留原距离 / 速度课程
     if other_terrain.any():

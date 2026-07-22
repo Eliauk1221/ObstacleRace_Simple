@@ -679,6 +679,18 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             pattern_origin_x_m=-3.0,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
+        # 与现有交错斜坡使用同一几何；仅 reset 出生区独立，专门训练坡前低侧进入。
+        "interlaced_corridor_wedges_approach": HfInterlacedCorridorWedgesTerrainCfg(
+            proportion=0.1,
+            corridor_half_width_m=1.5,
+            segment_length_m=1.5,
+            num_segments=4,
+            slope_angle_range=(15.0, 15.0),
+            edge_blend_m=0.02,
+            corridor_edge_fade_m=0.06,
+            pattern_origin_x_m=-3.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
         "s_curve": HfSCurveTerrainCfg(
             proportion=0.1,
             size=(12.0, 12.0),

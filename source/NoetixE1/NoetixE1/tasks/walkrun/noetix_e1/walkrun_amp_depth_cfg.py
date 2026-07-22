@@ -258,6 +258,12 @@ class CommandsCfg:
                 ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.5, 0.9, 0.5],
             ),
+            "interlaced_corridor_wedges_approach": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.3, 1.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.5, 0.9, 0.5],
+            ),
             "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
                 lin_vel_x=(0.0, 2.5),
                 lin_vel_y=(0.0, 0.5),
@@ -577,6 +583,7 @@ class EventCfg:
                 "cross_stepping_stones1": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "beam": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "interlaced_corridor_wedges": (-0.5235987755982988, 0.5235987755982988),  # +/- 30 deg
+                "interlaced_corridor_wedges_approach": (-0.2617993877991494, 0.2617993877991494),  # +/- 15 deg
             },
             "terrain_specific_pos_range": {
                 "cross_stepping_stones3": {
@@ -599,9 +606,14 @@ class EventCfg:
                     "x": (-2.25, -2.25),  # First 1.5 m segment center: -3.0 + 1.5 / 2.
                     "y": (0.0, 0.0),
                 },
+                "interlaced_corridor_wedges_approach": {
+                    "x": (-4.0, -3.2),
+                    "y": (-0.75, -0.25),
+                },
             },
             "terrain_specific_spawn_z_offset": {
                 "interlaced_corridor_wedges": -0.2,
+                "interlaced_corridor_wedges_approach": -0.6,
             },
             "terrain_specific_s_curve_spawn": {
                 "path_fraction_range": (0.02, 0.15),
@@ -712,6 +724,14 @@ class EventCfg:
                     "pitch": (-0.5, 0.5),
                     "yaw": (-0.5, 0.5),
                 },
+                "interlaced_corridor_wedges_approach": {
+                    "x": (-0.8, 0.8),
+                    "y": (-0.8, 0.8),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
+                    "yaw": (-0.5, 0.5),
+                },
             },
         },
     )
@@ -728,7 +748,9 @@ class RewardsCfg:
         weight=1.0,
         params={
             "std": 0.5,
-            "skip_terrain_types": ("figure8_bridge", "s_curve", "interlaced_corridor_wedges"),
+            "skip_terrain_types": (
+                "figure8_bridge", "s_curve", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
+            ),
         },
     )
     low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
@@ -736,7 +758,9 @@ class RewardsCfg:
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
         params={
-            "terrain_types": ("figure8_bridge", "s_curve", "interlaced_corridor_wedges"),
+            "terrain_types": (
+                "figure8_bridge", "s_curve", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
+            ),
             "scale_on_terrain": 0.0,
         },
     )
@@ -851,7 +875,67 @@ class RewardsCfg:
             "local_x_range": (-3.0, 3.0),
         },
     )
-    interlaced_ramp_step_up_lift = RewTerm(
+    # interlaced_ramp_step_up_lift = RewTerm(
+    #     func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
+    #     weight=6,
+    #     params={
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+    #         "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+    #         "offset": 0.06,
+    #         "clearance_threshold": 0.15,
+    #         "std": 0.05,
+    #         "x_range": (-3.4, -2.8),
+    #         "min_forward_command": 0.3,
+    #         "terrain_types": ("interlaced_corridor_wedges",),
+    #     },
+    # )
+    
+    # ------------------------------------- interlaced_corridor_wedges_approach -------------------------------------
+
+    approach_corridor_centerline_guidance = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=1.5,
+        params={
+            "std": 0.5,
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, -3.4),
+        },
+    )
+    approach_corridor_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=1.5,
+        params={
+            "std": 0.2,
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-3.4, 3.0),
+        },
+    )
+    approach_corridor_world_x_progress_guidance = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.3,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "safe_half_width_m": 0.85,
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, -3.4),
+        },
+    )
+    approach_corridor_world_x_progress = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.3,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "safe_half_width_m": 0.7,
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-3.4, 3.0),
+        },
+    )
+    approach_interlaced_ramp_step_up_lift = RewTerm(
         func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
         weight=6,
         params={
@@ -863,7 +947,7 @@ class RewardsCfg:
             "std": 0.05,
             "x_range": (-3.4, -2.8),
             "min_forward_command": 0.3,
-            "terrain_types": ("interlaced_corridor_wedges",),
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
         },
     )
     # ------------------------------------------------- Base --------------------------------------------------
@@ -909,7 +993,7 @@ class RewardsCfg:
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
-                "interlaced_corridor_wedges",
+                "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
             ),
         },
     )
@@ -923,7 +1007,7 @@ class RewardsCfg:
                 "stairs_up", "stairs_down",
                 "gap", "discrete_obstacles", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
-                "interlaced_corridor_wedges",
+                "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
             ),
         },
     )
