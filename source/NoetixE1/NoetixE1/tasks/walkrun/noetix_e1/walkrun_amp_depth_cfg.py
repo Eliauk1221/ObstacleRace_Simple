@@ -63,7 +63,13 @@ class E1SceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         virtual_obstacles={
             "edges": GreedyconcatEdgeCylinderCfg(
-                cylinder_radius=0.05,
+                cylinder_radius=0.1,
+                # Closed figure8 uses asymmetric virtual edge radii.
+                inner_edge_cylinder_radius=0.07,
+                outer_edge_cylinder_radius=0.12,
+                figure8_annulus_inner_radius_m=2.5,
+                figure8_bridge_widths=(0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
+                figure8_cell_size_m=12.0,
                 min_points=2,
             ),
         },
@@ -265,15 +271,9 @@ class CommandsCfg:
                 zero_prob=[0.5, 0.9, 0.5],
             ),
             "figure8_bridge": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
-                lin_vel_x=(0.0, 2.5),
+                lin_vel_x=(0.0, 2.0),
                 lin_vel_y=(0.0, 0.5),
-                ang_vel_z=(0.0, 0.0),
-                zero_prob=[0.5, 0.9, 0.5],
-            ),
-            "s_curve": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
-                lin_vel_x=(0.0, 1.5),
-                lin_vel_y=(0.0, 0.0),
-                ang_vel_z=(0.0, 0.0),
+                ang_vel_z=(0, 0),
                 zero_prob=[0.5, 0.9, 0.5],
             ),
         },
@@ -615,9 +615,14 @@ class EventCfg:
                 "interlaced_corridor_wedges": -0.2,
                 "interlaced_corridor_wedges_approach": -0.6,
             },
-            "terrain_specific_s_curve_spawn": {
-                "path_fraction_range": (0.02, 0.15),
+            "terrain_specific_figure8_spawn": {
+                "spawn_mode": "center_cutout",
                 "bridge_height": 0.1,
+                "holes_depth": 0.0,
+                "center_cutout_width_m": 0.8,
+                "center_cutout_length_m": 0.8,
+                "base_yaw_angles": (-1.57, 1.57),
+                "yaw_jitter_deg": 30.0,
                 "position_noise": 0.0,
             },
         },
@@ -749,17 +754,21 @@ class RewardsCfg:
         params={
             "std": 0.5,
             "skip_terrain_types": (
-                "figure8_bridge", "s_curve", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
+                "figure8_bridge", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
             ),
         },
     )
-    low_speed = RewTerm(func=mdp.low_speed_reward, weight=0.5, params={"min_cmd_vel": 0.1})
+    low_speed = RewTerm(
+        func=mdp.low_speed_reward,
+        weight=0.5,
+        params={"min_cmd_vel": 0.1, "skip_terrain_types": ("figure8_bridge",)},
+    )
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
         weight=-0.5,
         params={
             "terrain_types": (
-                "figure8_bridge", "s_curve", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
+                "figure8_bridge", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"
             ),
             "scale_on_terrain": 0.0,
         },
@@ -768,7 +777,7 @@ class RewardsCfg:
 
     # ------------------------------------------- figure8_bridge -------------------------------------------
     figure8_commanded_idle = RewTerm(
-        func=mdp.bridge_commanded_idle_penalty,
+        func=mdp.figure8_bridge_commanded_idle_penalty,
         weight=-1.0,
         params={
             "terrain_types": ("figure8_bridge",),
@@ -778,7 +787,7 @@ class RewardsCfg:
     )
     figure8_lateral_offset = RewTerm(
         func=mdp.figure8_bridge_lateral_offset_penalty,
-        weight=-1.0,
+        weight=-3.0,
         params={
             "terrain_types": ("figure8_bridge",),
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
@@ -789,66 +798,40 @@ class RewardsCfg:
             "edge_buffer_m": 0.05,
         },
     )
-    figure8_feet_impact = RewTerm(
-        func=mdp.feet_impact,
-        weight=-10.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "terrain_types": ("figure8_bridge",),
-        },
-    )
-
-    # ------------------------------------------- s_curve -------------------------------------------
-    s_curve_commanded_idle = RewTerm(
-        func=mdp.bridge_commanded_idle_penalty,
-        weight=-1.0,
-        params={
-            "terrain_types": ("s_curve",),
-            "min_cmd_speed": 0.15,
-            "min_body_speed": 0.08,
-        },
-    )
-    s_curve_lateral_offset = RewTerm(
-        func=mdp.s_curve_lateral_offset_penalty,
-        weight=-1.0,
-        params={
-            "terrain_types": ("s_curve",),
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
-            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
-            "edge_buffer_m": 0.05,
-        },
-    )
-    s_curve_path_forward = RewTerm(
-        func=mdp.s_curve_path_forward_reward,
+    figure8_path_forward = RewTerm(
+        func=mdp.figure8_bridge_path_forward_reward,
         weight=0.5,
         params={
-            "terrain_types": ("s_curve",),
+            "terrain_types": ("figure8_bridge",),
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
             "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "bridge_height": 0.1,
+            "bridge_tol": 0.04,
             "std": 0.25,
             "min_cmd_speed": 0.1,
         },
     )
-    s_curve_path_progress = RewTerm(
-        func=mdp.s_curve_path_progress_reward,
-        weight=1.0,
+    figure8_path_progress = RewTerm(
+        func=mdp.figure8_bridge_path_progress_reward,
+        weight=0.2,
         params={
-            "terrain_types": ("s_curve",),
+            "terrain_types": ("figure8_bridge",),
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
             "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "bridge_height": 0.1,
+            "bridge_tol": 0.04,
             "min_v_along": 0.05,
             "progress_scale": 1.0,
         },
     )
-    s_curve_feet_impact = RewTerm(
+    figure8_feet_impact = RewTerm(
         func=mdp.feet_impact,
-        weight=-10.0,
+        weight=-3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "terrain_types": ("s_curve",),
+            "terrain_types": ("figure8_bridge",),
         },
     )
 
@@ -984,7 +967,7 @@ class RewardsCfg:
         weight=-3.,
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "skip_terrain_types": ("figure8_bridge", "s_curve"),
+            "skip_terrain_types": ("figure8_bridge",),
         },
     )
     feet_air_time = RewTerm(
@@ -1022,6 +1005,15 @@ class RewardsCfg:
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
             ),
+        },
+    )
+
+    volume_points_penetration_figure8 = RewTerm(
+        func=mdp.volume_points_penetration_novel,
+        weight=-2.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("leg_volume_points"),
+            "terrain_types": ("figure8_bridge",),
         },
     )
 
@@ -1193,15 +1185,10 @@ class TerminationsCfg:
             "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "contact_force_threshold": 0.5,
             "root_drop_threshold_m": 0.06,
-        },
-    )
-    s_curve_fall_off = DoneTerm(
-        func=mdp.s_curve_fall_off,
-        params={
-            "terrain_types": ["s_curve"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "root_drop_threshold_m": 0.06,
+            # Allow a small outer margin and the vertical center transition used by the mesh.
+            "annulus_outer_margin_m": 0.08,
+            "transition_y_extend_m": 0.12,
+            "transition_x_margin_m": 0.06,
         },
     )
     # (5) Out of Bounds

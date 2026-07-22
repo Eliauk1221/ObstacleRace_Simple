@@ -85,32 +85,6 @@ def centerline_points_torch(
     return torch.cat([left, right], dim=0)
 
 
-def s_curve_centerline_points_torch(
-    inner_radius_m: float,
-    bridge_width_m: float,
-    samples_per_arc: int,
-    device: torch.device | str,
-) -> torch.Tensor:
-    """半 8 字 S 桥的开口中心线，方向为左端 -> 原点 -> 右端。
-
-    左侧采用上半圆，右侧采用下半圆；两段在原点有同向切线。返回的折线
-    不闭合，供 S 弯的路径奖励和进度课程使用。
-    """
-    n = max(2, int(samples_per_arc))
-    dev = _torch_device(device)
-    r_c = centerline_radius_m(inner_radius_m, bridge_width_m)
-
-    left_theta = torch.linspace(math.pi, 0.0, n, device=dev)
-    right_theta = torch.linspace(math.pi, 2.0 * math.pi, n, device=dev)
-    left = torch.stack(
-        [-r_c + r_c * torch.cos(left_theta), r_c * torch.sin(left_theta)], dim=1
-    )
-    right = torch.stack(
-        [r_c + r_c * torch.cos(right_theta), r_c * torch.sin(right_theta)], dim=1
-    )
-    return torch.cat([left[:-1], right], dim=0)
-
-
 def loop_centerline_xy_yaw(
     loop: Figure8Loop,
     theta: torch.Tensor,
@@ -179,56 +153,6 @@ def sample_path_spawn_xy_yaw(
     return x, y, yaw
 
 
-def sample_s_curve_path_spawn_xy_yaw(
-    num_samples: int,
-    device: torch.device | str,
-    inner_radius_m: float,
-    bridge_width_m: torch.Tensor | float,
-    path_fraction_range: tuple[float, float] = (0.02, 0.15),
-    position_noise: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """在 S 桥从左到右的前段路径上采样出生点与正向切线 yaw。
-
-    归一化路径参数 0 对应左端，0.5 对应两半环的原点连接，1 对应右端。
-    默认只在前 15% 采样，使单个 episode 有足够剩余弧长完成课程。
-    """
-    if num_samples <= 0:
-        empty = torch.empty(0, device=_torch_device(device))
-        return empty, empty, empty
-
-    dev = _torch_device(device)
-    lo, hi = (float(path_fraction_range[0]), float(path_fraction_range[1]))
-    lo, hi = max(0.0, lo), min(1.0, hi)
-    if hi < lo:
-        raise ValueError("path_fraction_range must satisfy min <= max.")
-    u = torch.empty(num_samples, device=dev, dtype=torch.float32).uniform_(lo, hi)
-    if isinstance(bridge_width_m, (float, int)):
-        r_c = torch.full((num_samples,), centerline_radius_m(inner_radius_m, bridge_width_m), device=dev)
-    else:
-        bridge_width_m = bridge_width_m.to(device=dev, dtype=torch.float32).reshape(-1)
-        if bridge_width_m.numel() != num_samples:
-            raise ValueError("bridge_width_m must have one value per sampled S-curve spawn.")
-        r_c = float(inner_radius_m) + 0.5 * bridge_width_m
-    on_left = u <= 0.5
-
-    left_theta = math.pi - 2.0 * math.pi * u
-    right_theta = math.pi + 2.0 * math.pi * (u - 0.5)
-    theta = torch.where(on_left, left_theta, right_theta)
-    center_x = torch.where(on_left, -r_c, r_c)
-    x = center_x + r_c * torch.cos(theta)
-    y = r_c * torch.sin(theta)
-
-    # d/ds: left theta decreases; right theta increases.
-    dx = torch.where(on_left, torch.sin(theta), -torch.sin(theta))
-    dy = torch.where(on_left, -torch.cos(theta), torch.cos(theta))
-    yaw = torch.atan2(dy, dx)
-
-    if position_noise > 0.0:
-        x = x + torch.empty_like(x).uniform_(-position_noise, position_noise)
-        y = y + torch.empty_like(y).uniform_(-position_noise, position_noise)
-    return x, y, yaw
-
-
 def bridge_width_for_terrain_levels(
     terrain_levels: torch.Tensor,
     num_rows: int,
@@ -239,26 +163,6 @@ def bridge_width_for_terrain_levels(
         terrain_difficulty_from_levels(terrain_levels, num_rows),
         bridge_width_by_level,
     )
-
-
-def bridge_width_for_runtime_terrain_levels(
-    terrain_levels: torch.Tensor,
-    num_rows: int,
-    bridge_width_by_level: tuple[float, ...] | list[float],
-    difficulty_range: tuple[float, float] | list[float] | None = None,
-) -> torch.Tensor:
-    """按运行时地形设置取桥宽，兼容固定难度的单行展示场景。
-
-    普通课程由 ``terrain_levels`` 决定桥宽。单行且
-    ``difficulty_range=(d, d)`` 时，生成器实际按 ``d`` 生成地形，不能把
-    它误当作第 0 档。
-    """
-    if int(num_rows) <= 1 and difficulty_range is not None and len(difficulty_range) == 2:
-        low, high = (float(difficulty_range[0]), float(difficulty_range[1]))
-        if math.isclose(low, high):
-            difficulty = torch.full_like(terrain_levels, low, dtype=torch.float32)
-            return bridge_width_from_terrain_difficulty(difficulty, bridge_width_by_level)
-    return bridge_width_for_terrain_levels(terrain_levels, num_rows, bridge_width_by_level)
 
 
 def terrain_difficulty_from_levels(
@@ -361,17 +265,109 @@ def foot_xy_in_expanded_cutout_torch(
     return (foot_xy[:, 0].abs() <= half_w) & (foot_xy[:, 1].abs() <= half_l)
 
 
+def foot_xy_on_figure8_inner_pit_torch(
+    foot_xy: torch.Tensor,
+    inner_radius_m: float,
+    bridge_width_m: torch.Tensor,
+) -> torch.Tensor:
+    """圆环**内圈**坑底（``d < inner_r``）：有地面 mesh，但不在桥面环带上。
+
+    从中心 cutout 上桥必经此区；终止判定需计入，否则 ``leave_valid`` 误杀。
+    """
+    n = foot_xy.shape[0]
+    device, dtype = foot_xy.device, foot_xy.dtype
+    inner_r = torch.full((n,), float(inner_radius_m), device=device, dtype=dtype)
+    bw = (
+        torch.full((n,), float(bridge_width_m), device=device, dtype=dtype)
+        if isinstance(bridge_width_m, (float, int))
+        else bridge_width_m.to(device=device, dtype=dtype).reshape(-1)
+    )
+    r_c = inner_r + 0.5 * bw
+    d_left = torch.hypot(foot_xy[:, 0] + r_c, foot_xy[:, 1])
+    d_right = torch.hypot(foot_xy[:, 0] - r_c, foot_xy[:, 1])
+    return (d_left < inner_r) | (d_right < inner_r)
+
+
 def foot_xy_on_figure8_support_torch(
     foot_xy: torch.Tensor,
     inner_radius_m: float,
     bridge_width_m: torch.Tensor,
     cutout_width_m: float = 0.0,
     cutout_length_m: float = 0.0,
+    annulus_outer_margin_m: float = 0.0,
+    annulus_inner_margin_m: float = 0.0,
+    include_inner_pit: bool = False,
 ) -> torch.Tensor:
-    """环带桥面或中心矩形挖空区均视为有效支撑面。"""
-    on_bridge = foot_xy_on_bridge_annulus_torch(foot_xy, inner_radius_m, bridge_width_m)
+    """环带桥面、中心挖空，或（终止用）圆环内圈坑底，均视为有效支撑面。"""
+    on_bridge = foot_xy_on_bridge_annulus_torch(
+        foot_xy,
+        inner_radius_m,
+        bridge_width_m,
+        outer_margin_m=annulus_outer_margin_m,
+        inner_margin_m=annulus_inner_margin_m,
+    )
     on_cutout = foot_xy_on_center_cutout_torch(foot_xy, cutout_width_m, cutout_length_m)
-    return on_bridge | on_cutout
+    on_pit = (
+        foot_xy_on_figure8_inner_pit_torch(foot_xy, inner_radius_m, bridge_width_m)
+        if include_inner_pit
+        else torch.zeros_like(on_bridge)
+    )
+    return on_bridge | on_cutout | on_pit
+
+
+def foot_xy_on_figure8_termination_valid_torch(
+    foot_xy: torch.Tensor,
+    inner_radius_m: float,
+    bridge_width_m: torch.Tensor,
+    cutout_width_m: float = 0.0,
+    cutout_length_m: float = 0.0,
+    annulus_outer_margin_m: float = 0.08,
+    transition_y_extend_m: float = 0.12,
+    transition_x_margin_m: float = 0.06,
+) -> torch.Tensor:
+    """终止用有效支撑：环带（外缘略扩）∪ cutout ∪ 中心上下过渡区（含内圈坑底）。
+
+    上下过渡区 = cutout 沿 ±y 外扩 ``transition_y_extend_m``、沿 ±x 外扩 ``transition_x_margin_m``，
+    仅在该走廊内将内圈坑底计入有效区，避免全局 inner_pit 导致掉桥不终止。
+    """
+    on_bridge = foot_xy_on_bridge_annulus_torch(
+        foot_xy,
+        inner_radius_m,
+        bridge_width_m,
+        outer_margin_m=float(annulus_outer_margin_m),
+    )
+    on_cutout = foot_xy_on_center_cutout_torch(foot_xy, cutout_width_m, cutout_length_m)
+
+    cw = float(cutout_width_m)
+    cl = float(cutout_length_m)
+    if cw > 0.0 and cl > 0.0:
+        half_w = 0.5 * cw + float(transition_x_margin_m)
+        half_l = 0.5 * cl + float(transition_y_extend_m)
+        in_transition = (foot_xy[:, 0].abs() <= half_w) & (foot_xy[:, 1].abs() <= half_l)
+        on_pit = foot_xy_on_figure8_inner_pit_torch(foot_xy, inner_radius_m, bridge_width_m) & in_transition
+    else:
+        on_pit = torch.zeros(foot_xy.shape[0], dtype=torch.bool, device=foot_xy.device)
+
+    return on_bridge | on_cutout | on_pit
+
+
+def foot_xy_in_figure8_vertical_transition_torch(
+    foot_xy: torch.Tensor,
+    cutout_width_m: float,
+    cutout_length_m: float,
+    transition_y_extend_m: float = 0.12,
+    transition_x_margin_m: float = 0.06,
+) -> torch.Tensor:
+    """中心 cutout 上下延伸过渡走廊（含 cutout 本体），用于跌落判定的坑底豁免。"""
+    n = foot_xy.shape[0]
+    device = foot_xy.device
+    cw = float(cutout_width_m)
+    cl = float(cutout_length_m)
+    if cw <= 0.0 or cl <= 0.0:
+        return torch.zeros(n, dtype=torch.bool, device=device)
+    half_w = 0.5 * cw + float(transition_x_margin_m)
+    half_l = 0.5 * cl + float(transition_y_extend_m)
+    return (foot_xy[:, 0].abs() <= half_w) & (foot_xy[:, 1].abs() <= half_l)
 
 
 def sample_center_cutout_spawn_xy_yaw(
@@ -412,6 +408,8 @@ def foot_xy_on_bridge_annulus_torch(
     foot_xy: torch.Tensor,
     inner_radius_m: float,
     bridge_width_m: torch.Tensor,
+    outer_margin_m: float = 0.0,
+    inner_margin_m: float = 0.0,
 ) -> torch.Tensor:
     """脚底 XY（env 局部系）是否落在双圆 8 字桥面环形足迹内，形状 ``(N,)`` bool。"""
     n = foot_xy.shape[0]
@@ -424,36 +422,10 @@ def foot_xy_on_bridge_annulus_torch(
     )
     r_c = inner_r + 0.5 * bw
     outer_r = inner_r + bw
+    inner_lo = inner_r - float(inner_margin_m)
+    outer_hi = outer_r + float(outer_margin_m)
     d_left = torch.hypot(foot_xy[:, 0] + r_c, foot_xy[:, 1])
     d_right = torch.hypot(foot_xy[:, 0] - r_c, foot_xy[:, 1])
-    on_left = (d_left >= inner_r) & (d_left <= outer_r)
-    on_right = (d_right >= inner_r) & (d_right <= outer_r)
-    return on_left | on_right
-
-
-def foot_xy_on_s_curve_torch(
-    foot_xy: torch.Tensor,
-    inner_radius_m: float,
-    bridge_width_m: torch.Tensor | float,
-) -> torch.Tensor:
-    """脚底 XY 是否在 S 桥有效半环带上。
-
-    与 ``s_curve_terrain`` 完全一致：左圆只接受 ``y >= 0``，
-    右圆只接受 ``y <= 0``。不能复用闭合 8 字的双圆环带掩码，否则会把
-    S 桥坑底中的另外两个半圆误当成可支撑桥面。
-    """
-    n = foot_xy.shape[0]
-    device, dtype = foot_xy.device, foot_xy.dtype
-    inner_r = torch.full((n,), float(inner_radius_m), device=device, dtype=dtype)
-    bw = (
-        torch.full((n,), float(bridge_width_m), device=device, dtype=dtype)
-        if isinstance(bridge_width_m, (float, int))
-        else bridge_width_m.to(device=device, dtype=dtype).reshape(-1)
-    )
-    r_c = inner_r + 0.5 * bw
-    outer_r = inner_r + bw
-    d_left = torch.hypot(foot_xy[:, 0] + r_c, foot_xy[:, 1])
-    d_right = torch.hypot(foot_xy[:, 0] - r_c, foot_xy[:, 1])
-    on_left = (d_left >= inner_r) & (d_left <= outer_r) & (foot_xy[:, 1] >= 0.0)
-    on_right = (d_right >= inner_r) & (d_right <= outer_r) & (foot_xy[:, 1] <= 0.0)
+    on_left = (d_left >= inner_lo) & (d_left <= outer_hi)
+    on_right = (d_right >= inner_lo) & (d_right <= outer_hi)
     return on_left | on_right

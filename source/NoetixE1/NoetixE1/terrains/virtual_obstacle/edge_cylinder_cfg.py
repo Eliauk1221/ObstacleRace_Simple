@@ -23,7 +23,29 @@ class EdgeCylinderCfg(VirtualObstacleCfg):
     """The angle threshold to consider an edge as sharp."""
 
     cylinder_radius: float = 0.2
-    """The radius of the edge cylinder, which is used to treat the edge cylinders as a virtual obstacle."""
+    """Default radius of edge cylinders (non-classified edges)."""
+
+    inner_edge_cylinder_radius: float | None = None
+    """If set with ``outer_edge_cylinder_radius``, figure8 inner annulus edges use this (smaller) radius."""
+
+    outer_edge_cylinder_radius: float | None = None
+    """If set with ``inner_edge_cylinder_radius``, figure8 outer annulus edges use this (larger) radius."""
+
+    figure8_annulus_inner_radius_m: float = 2.5
+    """figure8 bridge deck inner radius (m), used to classify inner/outer edges."""
+
+    figure8_bridge_widths: tuple[float, ...] = (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4)
+    """Candidate bridge widths for classifying figure8 annulus edges."""
+
+    figure8_cell_size_m: float = 12.0
+    """figure8 sub-terrain cell size (m), used to fold world XY into a local tile frame."""
+
+    figure8_edge_radial_tol_m: float = 0.10
+    """Radial match tolerance (m) when classifying an edge as inner/outer annulus."""
+
+    figure8_edge_z_range_m: tuple[float, float] = (0.02, 0.20)
+    """Only edges whose midpoint z is in this band are classified as figure8 deck edges."""
+
     num_grid_cells: int = 64**3
     """The number of grid cells to use for spatial partitioning of the edge cylinders.
     Usually the power of 2, e.g., 64^3 = 262144.

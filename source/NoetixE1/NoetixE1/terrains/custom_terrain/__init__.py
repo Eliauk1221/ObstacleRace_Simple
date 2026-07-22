@@ -9,7 +9,7 @@ from .custom_terrains_cfg import (
     HfDoubleFramePlatformTerrainCfg,
     HfFramePlatformTerrainCfg,
     HfFigure8BridgeTerrainCfg,
-    HfSCurveTerrainCfg,
+    MeshFigure8BridgeTerrainCfg,
     HfInterlacedCorridorWedgesTerrainCfg,
     HfMultiGapTerrainCfg,
     HfSingleGapTerrainCfg,
@@ -26,7 +26,7 @@ __all__ = [
     "HfDoubleFramePlatformTerrainCfg",
     "HfFramePlatformTerrainCfg",
     "HfFigure8BridgeTerrainCfg",
-    "HfSCurveTerrainCfg",
+    "MeshFigure8BridgeTerrainCfg",
     "HfInterlacedCorridorWedgesTerrainCfg",
     "HfMultiGapTerrainCfg",
     "HfSingleGapTerrainCfg",
@@ -37,4 +37,3 @@ __all__ = [
     "HfSteppingStonesTerrainCfg",
     "HfHurdleTerrainCfg",
 ]
-

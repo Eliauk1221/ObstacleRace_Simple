@@ -41,7 +41,7 @@ from .custom_terrain import (
     HfDoubleFramePlatformTerrainCfg,
     HfSingleGapTerrainCfg,
     HfInterlacedCorridorWedgesTerrainCfg,
-    HfSCurveTerrainCfg,
+    MeshFigure8BridgeTerrainCfg,
 )
 from .trimesh import ExternalMeshFromMetadataTerrainCfg
 
@@ -586,7 +586,7 @@ class FiledTerrainGeneratorCfg(TerrainGeneratorCfgBase):
     class_type: type = FiledTerrainGenerator
 
     standard_feature_extent_m: float = 8.0
-    """Effective content side for generic terrains when the terrain cell is larger."""
+    """Effective content side for generic terrains when the global cell is enlarged for figure8."""
 
 
 from isaaclab.terrains import FlatPatchSamplingCfg
@@ -691,15 +691,17 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             pattern_origin_x_m=-3.0,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        "s_curve": HfSCurveTerrainCfg(
-            proportion=0.1,
+        "figure8_bridge": MeshFigure8BridgeTerrainCfg(
+            proportion=0.25,
             size=(12.0, 12.0),
             inner_radius_m=2.5,
             bridge_height=0.1,
             bridge_width_by_level=(0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
-            holes_depth=(-0.3, -0.5),
-            center_cutout_width_m=0.0,
-            center_cutout_length_m=0.0,
+            holes_depth=(0, 0),
+            center_cutout_width_m=0.8,
+            center_cutout_length_m=0.8,
+            samples_per_loop=128,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
     },
 )

@@ -6,9 +6,11 @@
 
 from dataclasses import MISSING
 
+from isaaclab.terrains.terrain_generator_cfg import SubTerrainBaseCfg
 from isaaclab.utils import configclass
 
 from . import custom_terrains
+from . import figure8_mesh_terrains
 from isaaclab.terrains.height_field.hf_terrains_cfg import HfTerrainBaseCfg
 
 
@@ -425,8 +427,8 @@ class HfFigure8BridgeTerrainCfg(HfTerrainBaseCfg):
     bridge_width_range: tuple[float, float] = (0.8, 0.45)
     """兼容旧逻辑：未设置 ``bridge_width_by_level`` 时在 ``[0]`` 与 ``[1]`` 间线性插值。"""
 
-    bridge_width_by_level: tuple[float, ...] = (0.8, 0.7, 0.6, 0.5, 0.45)
-    """离散等级桥宽（米）：level 0→0.8 … level 4→0.45；由 difficulty 映射到索引。"""
+    bridge_width_by_level: tuple[float, ...] = (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4)
+    """离散等级桥宽（米）：与 num_rows=10 对齐，level 0→0.85 … level 9→0.4。"""
 
     holes_depth: tuple[float, float] = (-0.3, -0.5)
     """坑底深度（米，负值）；随 difficulty 插值。"""
@@ -443,17 +445,15 @@ class HfFigure8BridgeTerrainCfg(HfTerrainBaseCfg):
     center_cutout_length_m: float = 0.0
     """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
 
-@configclass
-class HfSCurveTerrainCfg(HfTerrainBaseCfg):
-    """半 8 字 → S 形开口桥：在 :class:`HfFigure8BridgeTerrainCfg` 的双圆环带基础上，仅保留一半环带形成 S 形通道。
 
-    约定（env 局部系，原点为几何中心）：
-    - 左圆心 ``(-r_c, 0)``：保留 **上半环带**（``y >= 0``）
-    - 右圆心 ``(+r_c, 0)``：保留 **下半环带**（``y <= 0``）
-    - 其余逻辑（坑底、桥面高度、桥宽难度映射、软边）与 figure8_bridge 保持一致
+@configclass
+class MeshFigure8BridgeTerrainCfg(SubTerrainBaseCfg):
+    """Trimesh 参数化闭合 8 字桥：几何与 :class:`HfFigure8BridgeTerrainCfg` 一致，桥面为光滑圆环 mesh。
+
+    与高度场版相比不使用 ``radial_edge_fade_m`` / ``slope_threshold`` 离散化，内外缘为解析圆弧。
     """
 
-    function = custom_terrains.s_curve_terrain
+    function = figure8_mesh_terrains.figure8_bridge_mesh_terrain
 
     size: tuple[float, float] = (12.0, 12.0)
     """单格场地边长（米）。"""
@@ -465,25 +465,22 @@ class HfSCurveTerrainCfg(HfTerrainBaseCfg):
     """桥面顶面高度（米）。"""
 
     bridge_width_range: tuple[float, float] = (0.8, 0.45)
-    """兼容旧逻辑：未设置 ``bridge_width_by_level`` 时在 ``[0]`` 与 ``[1]`` 间线性插值。"""
+    """未设置 ``bridge_width_by_level`` 时在区间内线性插值。"""
 
     bridge_width_by_level: tuple[float, ...] = (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4)
-    """离散等级桥宽（米）：与 ``num_rows=10`` 对齐，level 0→0.85 … level 9→0.4。"""
+    """离散等级桥宽（米）。"""
 
     holes_depth: tuple[float, float] = (-0.3, -0.5)
     """坑底深度（米，负值）；随 difficulty 插值。"""
 
     radial_edge_fade_m: float = 0.03
-    """桥面内外缘软过渡宽度（米）。"""
+    """保留字段以与 HF 配置对齐；Trimesh 版不使用软边 fade。"""
 
-    samples_per_loop: int = 256
-    """中心线采样数（与 figure8 保持同默认，便于复用奖励/调参习惯）。"""
+    samples_per_loop: int = 128
+    """每圈圆弧离散段数（越大越光滑）。"""
 
     center_cutout_width_m: float = 0.0
     """原点矩形挖空宽度（米，沿 x）；0 表示关闭。"""
 
     center_cutout_length_m: float = 0.0
     """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
-
-    curriculum_success_arc_fraction: float = 0.75
-    """课程升档所需完成的 S 弯总弧长比例；默认要求正向走过 75%。"""

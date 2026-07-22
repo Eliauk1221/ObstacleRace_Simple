@@ -32,7 +32,6 @@ if TYPE_CHECKING:
         RayEdgeCylinderCfg,
     )
 
-
 class EdgeCylinder(VirtualObstacleBase):
     """Base class for edge detectors."""
 
@@ -75,19 +74,67 @@ class EdgeCylinder(VirtualObstacleBase):
         self.edges_pyt = torch.tensor(edge_end_points, dtype=torch.float32, device=self.device)
         # create a cylinder spatial grid for the edges and for penetration offset computation
         if edge_end_points.size > 0:
+            radii = self._assign_cylinder_radii(edge_end_points)
+            self.cylinder_radii_pyt = torch.tensor(radii, dtype=torch.float32, device=self.device).reshape(-1)
             self.cylinders = CylinderSpatialGrid(
-                cylinders=np.concatenate(
-                    [
-                        edge_end_points,
-                        np.ones_like(edge_end_points[:, :1]) * self.cfg.cylinder_radius,
-                    ],
-                    axis=1,
-                ),
+                cylinders=np.concatenate([edge_end_points, radii], axis=1),
                 num_grid_cells=self.cfg.num_grid_cells,
                 device=self.device,
             )
         else:
             self.cylinders = None
+            self.cylinder_radii_pyt = torch.empty(0, dtype=torch.float32, device=self.device)
+
+    def _assign_cylinder_radii(self, edge_end_points: np.ndarray) -> np.ndarray:
+        """Per-edge radii; optionally shrink figure8 inner edges and enlarge outer edges."""
+        num_edges = edge_end_points.shape[0]
+        radii = np.full((num_edges, 1), float(self.cfg.cylinder_radius), dtype=np.float32)
+        inner_r_cyl = getattr(self.cfg, "inner_edge_cylinder_radius", None)
+        outer_r_cyl = getattr(self.cfg, "outer_edge_cylinder_radius", None)
+        if inner_r_cyl is None or outer_r_cyl is None or num_edges == 0:
+            return radii
+
+        mid = 0.5 * (edge_end_points[:, :3] + edge_end_points[:, 3:6])
+        z_lo, z_hi = getattr(self.cfg, "figure8_edge_z_range_m", (0.02, 0.20))
+        in_z = (mid[:, 2] >= float(z_lo)) & (mid[:, 2] <= float(z_hi))
+        if not np.any(in_z):
+            return radii
+
+        cell = float(getattr(self.cfg, "figure8_cell_size_m", 12.0))
+        annulus_inner = float(getattr(self.cfg, "figure8_annulus_inner_radius_m", 2.5))
+        widths = tuple(getattr(self.cfg, "figure8_bridge_widths", ()) or ())
+        tol = float(getattr(self.cfg, "figure8_edge_radial_tol_m", 0.10))
+        if cell <= 1e-6 or len(widths) == 0:
+            return radii
+
+        cx = np.round(mid[:, 0] / cell) * cell
+        cy = np.round(mid[:, 1] / cell) * cell
+        lx = mid[:, 0] - cx
+        ly = mid[:, 1] - cy
+
+        best_inner_err = np.full(num_edges, np.inf, dtype=np.float64)
+        best_outer_err = np.full(num_edges, np.inf, dtype=np.float64)
+        for w in widths:
+            w = float(w)
+            r_c = annulus_inner + 0.5 * w
+            outer_r = annulus_inner + w
+            for sign in (-1.0, 1.0):
+                d = np.hypot(lx - sign * r_c, ly)
+                best_inner_err = np.minimum(best_inner_err, np.abs(d - annulus_inner))
+                best_outer_err = np.minimum(best_outer_err, np.abs(d - outer_r))
+
+        is_inner = in_z & (best_inner_err <= tol) & (best_inner_err <= best_outer_err)
+        is_outer = in_z & (best_outer_err <= tol) & (best_outer_err < best_inner_err)
+        radii[is_inner, 0] = float(inner_r_cyl)
+        radii[is_outer, 0] = float(outer_r_cyl)
+        n_in, n_out = int(is_inner.sum()), int(is_outer.sum())
+        if n_in or n_out:
+            print(
+                f"[EdgeCylinder] figure8 asymmetric radii: "
+                f"inner={n_in} (r={inner_r_cyl}), outer={n_out} (r={outer_r_cyl}), "
+                f"default={num_edges - n_in - n_out} (r={self.cfg.cylinder_radius})"
+            )
+        return radii
 
     def disable_visualizer(self):
         if hasattr(self, "_cylinder_visualizer"):
@@ -120,8 +167,12 @@ class EdgeCylinder(VirtualObstacleBase):
         quat = math_utils.quat_mul(quat, self._cylinder_rotate_y_90.expand(quat.shape[0], -1))
         # compute the scale to match the length and the edge thickness.
         scales = torch.ones(len(self.edges_pyt), 3, device=self.device)
-        scales[:, 0] = self.cfg.cylinder_radius
-        scales[:, 1] = self.cfg.cylinder_radius
+        if hasattr(self, "cylinder_radii_pyt") and self.cylinder_radii_pyt.numel() == len(self.edges_pyt):
+            scales[:, 0] = self.cylinder_radii_pyt
+            scales[:, 1] = self.cylinder_radii_pyt
+        else:
+            scales[:, 0] = self.cfg.cylinder_radius
+            scales[:, 1] = self.cfg.cylinder_radius
         scales[:, 2] = torch.norm(direction, dim=-1)
         self._cylinder_visualizer.visualize(
             translations=trans,
@@ -147,7 +198,6 @@ class EdgeCylinder(VirtualObstacleBase):
             A np array of processed edge coordinates.
         """
         return edge_coords
-
 
 class PluckerEdgeCylinder(EdgeCylinder):
     """Detects sharp edges in a mesh using the Laplacian operator."""

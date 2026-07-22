@@ -11,7 +11,6 @@ the curriculum introduced by the function.
 
 from __future__ import annotations
 
-import math
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -612,11 +611,6 @@ def terrain_levels_vel_with_termination(
     - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
 
-    **s_curve**
-    - move_up：沿开口 S 弯累计走过其总弧长的指定比例，且未掉桥
-    - move_down：仅 ``s_curve_fall_off``
-    - 弧长由 ``s_curve_path_progress_reward`` 写入 ``env.s_curve_episode_arc_m``
-
     **其它地形**
     - 有前进速度指令：原距离课程
     - 无前进速度指令：超时不变档；仅 ``fall_down_in_some_terrain`` 降档（不含姿态类终止）
@@ -683,11 +677,10 @@ def terrain_levels_vel_with_termination(
     move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
-    is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, ("s_curve",))
     is_interlaced_approach = _env_ids_on_terrain_types(
         env, env_ids_tensor, ("interlaced_corridor_wedges_approach",)
     )
-    other_terrain = ~(is_figure8 | is_s_curve | is_interlaced_approach)
+    other_terrain = ~(is_figure8 | is_interlaced_approach)
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -697,7 +690,13 @@ def terrain_levels_vel_with_termination(
 
         f8_sub = terrain_gen_cfg.sub_terrains.get("figure8_bridge")
         inner_r = float(getattr(f8_sub, "inner_radius_m", 2.5)) if f8_sub is not None else 2.5
-        widths = tuple(getattr(f8_sub, "bridge_width_by_level", (0.8, 0.7, 0.6, 0.5, 0.45)))
+        widths = tuple(
+            getattr(
+                f8_sub,
+                "bridge_width_by_level",
+                (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4),
+            )
+        )
         from NoetixE1.terrains.custom_terrain.figure8_geometry import half_loop_arc_length_m
 
         half_loop = half_loop_arc_length_m(
@@ -714,36 +713,6 @@ def terrain_levels_vel_with_termination(
 
         move_up[f8_local] = arc_ok & ~fell_off
         move_down[f8_local] = fell_off
-
-    # S 弯：开口双半环总长 2*pi*r_c；默认要求正向完成 75%。
-    if is_s_curve.any():
-        sc_local = torch.where(is_s_curve)[0]
-        sc_env_ids = env_ids_tensor[sc_local]
-        fell_off = env.termination_manager.get_term("s_curve_fall_off")[sc_env_ids]
-
-        sc_sub = terrain_gen_cfg.sub_terrains.get("s_curve")
-        inner_r = float(getattr(sc_sub, "inner_radius_m", 2.5)) if sc_sub is not None else 2.5
-        widths = tuple(
-            getattr(sc_sub, "bridge_width_by_level", (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4))
-        )
-        success_arc_fraction = float(getattr(sc_sub, "curriculum_success_arc_fraction", 0.75))
-        from NoetixE1.terrains.custom_terrain.figure8_geometry import bridge_width_for_runtime_terrain_levels
-
-        bridge_width_m = bridge_width_for_runtime_terrain_levels(
-            terrain.terrain_levels[sc_env_ids],
-            int(terrain_gen_cfg.num_rows),
-            widths,
-            getattr(terrain_gen_cfg, "difficulty_range", None),
-        )
-        required_arc = 2.0 * math.pi * (inner_r + 0.5 * bridge_width_m) * success_arc_fraction
-        episode_arc = getattr(env.unwrapped, "s_curve_episode_arc_m", None)
-        if episode_arc is None:
-            arc_ok = torch.zeros(len(sc_local), dtype=torch.bool, device=env.device)
-        else:
-            arc_ok = episode_arc[sc_env_ids] >= required_arc
-
-        move_up[sc_local] = arc_ok & ~fell_off
-        move_down[sc_local] = fell_off
 
     # 坡前出生不能使用相对 terrain origin 的欧氏距离：初始 x 已接近 -4 m。
     # 仅在走到四段走廊末端时升档；有前进指令却仍停在入口前则降档。
