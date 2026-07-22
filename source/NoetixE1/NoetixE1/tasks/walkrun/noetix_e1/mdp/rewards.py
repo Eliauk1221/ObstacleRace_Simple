@@ -399,7 +399,10 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     return torch.sum(is_contact, dim=1)
 
 def low_speed_reward(
-    env: ManagerBasedRLEnv, min_cmd_vel: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    min_cmd_vel: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
@@ -422,7 +425,11 @@ def low_speed_reward(
     reward[speed_too_high] = 0.
     # Speed within desired range
     reward[speed_desired] = 1.2
-    return reward * (absolute_command > abs(min_cmd_vel))
+    reward = reward * (absolute_command > abs(min_cmd_vel))
+    if skip_terrain_types:
+        on_skip = _terrain_type_mask(env, skip_terrain_types, reward.device)
+        reward = reward * (~on_skip).float()
+    return reward
 
 
 def delta_yaw_reward(
