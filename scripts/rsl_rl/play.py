@@ -47,10 +47,12 @@ parser.add_argument(
     choices=[
         "",
         "interlaced_corridor_wedges",
+        "interlaced_corridor_wedges_approach",
         "figure8_bridge",
     ],
     help=(
-        "Single-cell demo terrain: interlaced_corridor_wedges (纵向交错交叉斜坡), "
+        "Single-cell demo terrain: interlaced_corridor_wedges (首段中心出生), "
+        "interlaced_corridor_wedges_approach (坡前低侧出生), "
         "figure8_bridge (闭合 8 字桥, Trimesh). "
         "Empty string disables."
     ),
@@ -350,9 +352,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             st = args_cli.showcase_terrain
             env_cfg.scene.terrain.terrain_generator.use_cache = False
             print(f"[INFO] showcase_terrain={st!r}, difficulty={args_cli.showcase_difficulty}")
-            if st == "interlaced_corridor_wedges":
+            if st in ("interlaced_corridor_wedges", "interlaced_corridor_wedges_approach"):
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
-                    "interlaced_corridor_wedges": terrain_gen.HfInterlacedCorridorWedgesTerrainCfg(
+                    st: terrain_gen.HfInterlacedCorridorWedgesTerrainCfg(
                         proportion=1.0,
                         corridor_half_width_m=1.5,
                         segment_length_m=1.5,
