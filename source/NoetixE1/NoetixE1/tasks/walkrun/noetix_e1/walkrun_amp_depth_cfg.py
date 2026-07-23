@@ -207,7 +207,7 @@ class E1SceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    base_velocity = mdp.UniformVelocityWithZeroCommandCfg(
+    base_velocity = mdp.TurnSequenceVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(5.0, 10.0),
         rel_standing_envs=0.1,
@@ -277,6 +277,11 @@ class CommandsCfg:
                 zero_prob=[0.5, 0.9, 0.5],
             ),
         },
+        # TURN ABLATION: set probability to 0.0 to restore the original command distribution.
+        turn_terrain_types=("interlaced_corridor_wedges",),
+        turn_sequence_probability=0.2,
+        turn_duration_range=(1.0, 5.0),
+        yaw_speed_range=(0.2, 1.0),
     )
 
 
@@ -873,7 +878,34 @@ class RewardsCfg:
     #         "terrain_types": ("interlaced_corridor_wedges",),
     #     },
     # )
-    
+
+    # -------------------------------- interlaced_corridor_wedges turn subset --------------------------------
+    # TURN ABLATION: active only for the 20% command environments selected by the command term.
+    turn_track_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_world_exp_turn_sequence,
+        weight=2.0,
+        params={
+            "std": 0.4,
+            "command_name": "base_velocity",
+        },
+    )
+    turn_static_stability = RewTerm(
+        func=mdp.turn_sequence_static_stability_reward,
+        weight=0.25,
+        params={
+            "command_name": "base_velocity",
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "lin_vel_std": 0.15,
+            "ang_vel_std": 0.25,
+            "orientation_std": 0.5,
+            "lin_vel_weight": 0.35,
+            "ang_vel_weight": 0.35,
+            "orientation_weight": 0.2,
+            "feet_contact_weight": 0.1,
+            "contact_force_threshold": 0.5,
+        },
+    )
+
     # ------------------------------------- interlaced_corridor_wedges_approach -------------------------------------
 
     approach_corridor_centerline_guidance = RewTerm(
@@ -1029,7 +1061,7 @@ class RewardsCfg:
 
     feet_too_near = RewTerm(
         func=mdp.feet_too_near_humanoid_xy,
-        weight=-10.0,
+        weight=-8.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*_ankle_roll_link"]), "threshold": 0.15},
     )
     # 梅花桩等地形上、x 指令 > 0.3 且两脚都接触时惩罚两脚过近，鼓励每脚一桩

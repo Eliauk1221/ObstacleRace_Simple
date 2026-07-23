@@ -94,6 +94,86 @@ def track_ang_vel_z_world_exp(
     return reward
 
 
+def track_ang_vel_z_world_exp_turn_sequence(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Existing yaw-rate tracking reward gated by the active turning phase."""
+    reward = track_ang_vel_z_world_exp(env, std, asset_cfg)
+    command_term = env.command_manager.get_term(command_name)
+    turn_mask = getattr(command_term, "is_turn_sequence_turning", None)
+    if turn_mask is None:
+        return torch.zeros_like(reward)
+    return reward * turn_mask.float()
+
+
+def turn_sequence_static_stability_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    contact_sensor_cfg: SceneEntityCfg,
+    lin_vel_std: float = 0.15,
+    ang_vel_std: float = 0.25,
+    orientation_std: float = 0.5,
+    lin_vel_weight: float = 0.35,
+    ang_vel_weight: float = 0.35,
+    orientation_weight: float = 0.2,
+    feet_contact_weight: float = 0.1,
+    contact_force_threshold: float = 0.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward static, upright, double-support holding after the turn phase."""
+    for name, value in (
+        ("lin_vel_std", lin_vel_std),
+        ("ang_vel_std", ang_vel_std),
+        ("orientation_std", orientation_std),
+    ):
+        if value <= 0.0:
+            raise ValueError(f"{name} must be positive, got {value}.")
+
+    component_weights = (
+        float(lin_vel_weight),
+        float(ang_vel_weight),
+        float(orientation_weight),
+        float(feet_contact_weight),
+    )
+    if any(weight < 0.0 for weight in component_weights):
+        raise ValueError(f"Static-stability component weights must be non-negative, got {component_weights}.")
+    weight_sum = sum(component_weights)
+    if weight_sum <= 0.0:
+        raise ValueError("At least one static-stability component weight must be positive.")
+    if contact_force_threshold < 0.0:
+        raise ValueError(f"contact_force_threshold must be non-negative, got {contact_force_threshold}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    lin_vel_reward = torch.exp(
+        -torch.sum(torch.square(asset.data.root_lin_vel_w), dim=1) / float(lin_vel_std) ** 2
+    )
+    ang_vel_reward = torch.exp(
+        -torch.sum(torch.square(asset.data.root_ang_vel_w), dim=1) / float(ang_vel_std) ** 2
+    )
+    orientation_reward = flat_orientation_exp(env, float(orientation_std), asset_cfg)
+
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, contact_sensor_cfg.body_ids, :]
+    feet_contact = torch.max(torch.norm(contact_forces, dim=-1), dim=1)[0] > float(contact_force_threshold)
+    both_feet_contact = torch.all(feet_contact, dim=1).float()
+
+    reward = (
+        component_weights[0] * lin_vel_reward
+        + component_weights[1] * ang_vel_reward
+        + component_weights[2] * orientation_reward
+        + component_weights[3] * both_feet_contact
+    ) / weight_sum
+
+    command_term = env.command_manager.get_term(command_name)
+    hold_mask = getattr(command_term, "is_turn_sequence_holding", None)
+    if hold_mask is None:
+        return torch.zeros_like(reward)
+    return reward * hold_mask.float()
+
+
 def flat_orientation_exp(
     env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:

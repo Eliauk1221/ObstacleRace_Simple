@@ -238,6 +238,102 @@ class UniformVelocityWithZeroCommand(CommandTerm):
 
         return arrow_scale, arrow_quat
 
+
+class TurnSequenceVelocityCommand(UniformVelocityWithZeroCommand):
+    """Add a one-shot turn-then-hold sequence on selected terrains."""
+
+    cfg: TurnSequenceVelocityCommandCfg
+
+    def __init__(self, cfg: TurnSequenceVelocityCommandCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        for name, limits in (
+            ("turn_duration_range", cfg.turn_duration_range),
+            ("yaw_speed_range", cfg.yaw_speed_range),
+        ):
+            lo, hi = map(float, limits)
+            if not (0.0 < lo <= hi):
+                raise ValueError(f"Invalid {name}: {limits}")
+        if not (0.0 <= cfg.turn_sequence_probability <= 1.0):
+            raise ValueError(f"Invalid turn_sequence_probability: {cfg.turn_sequence_probability}")
+
+        self.is_turn_sequence_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.is_turn_sequence_turning = torch.zeros_like(self.is_turn_sequence_env)
+        self.is_turn_sequence_holding = torch.zeros_like(self.is_turn_sequence_env)
+        self.turn_sequence_time_left = torch.zeros(self.num_envs, device=self.device)
+        self.turn_sequence_yaw_command = torch.zeros(self.num_envs, device=self.device)
+
+    def _resample_command(self, env_ids):
+        super()._resample_command(env_ids)
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        self.is_turn_sequence_env[env_ids] = False
+        self.is_turn_sequence_turning[env_ids] = False
+        self.is_turn_sequence_holding[env_ids] = False
+        self.turn_sequence_time_left[env_ids] = 0.0
+        self.turn_sequence_yaw_command[env_ids] = 0.0
+        if not self.cfg.turn_terrain_types:
+            return
+
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+        col_indices = getattr(self._env.unwrapped, "_current_terrain_col_indices", None)
+        if col_indices is None:
+            positions = self.robot.data.root_pos_w[env_ids]
+            is_turn_terrain = _check_terrain_types_from_positions(
+                self._env, positions, self.cfg.turn_terrain_types
+            )
+        else:
+            is_turn_terrain = _check_terrain_types_from_positions(
+                self._env, None, self.cfg.turn_terrain_types, col_indices=col_indices[env_ids]
+            )
+
+        # Select once at episode start. Periodic resampling must not accumulate more turn environments.
+        episode_start = self.command_counter[env_ids] == 0
+        selected = torch.rand(env_ids.numel(), device=self.device) < float(self.cfg.turn_sequence_probability)
+        turn_env_ids = env_ids[is_turn_terrain & episode_start & selected]
+        if turn_env_ids.numel() == 0:
+            return
+        self.is_turn_sequence_env[turn_env_ids] = True
+        self.is_turn_sequence_turning[turn_env_ids] = True
+        self.turn_sequence_time_left[turn_env_ids] = self._sample_phase_duration(
+            turn_env_ids, self.cfg.turn_duration_range
+        )
+        self.turn_sequence_yaw_command[turn_env_ids] = self._sample_yaw_speed(turn_env_ids)
+        self.vel_command_b[turn_env_ids, :] = 0.0
+        self.vel_command_b[turn_env_ids, 2] = self.turn_sequence_yaw_command[turn_env_ids]
+        self.time_left[turn_env_ids] = float("inf")
+
+    def _sample_phase_duration(self, env_ids: torch.Tensor, limits: tuple[float, float]) -> torch.Tensor:
+        lo, hi = map(float, limits)
+        return lo + torch.rand(env_ids.numel(), device=self.device) * (hi - lo)
+
+    def _sample_yaw_speed(self, env_ids: torch.Tensor) -> torch.Tensor:
+        magnitude = self._sample_phase_duration(env_ids, self.cfg.yaw_speed_range)
+        direction = torch.where(
+            torch.rand(env_ids.numel(), device=self.device) < 0.5,
+            -torch.ones_like(magnitude),
+            torch.ones_like(magnitude),
+        )
+        return magnitude * direction
+
+    def _update_command(self):
+        super()._update_command()
+        turn_env_ids = self.is_turn_sequence_env.nonzero(as_tuple=False).flatten()
+        if turn_env_ids.numel() == 0:
+            return
+
+        turning = turn_env_ids[self.is_turn_sequence_turning[turn_env_ids]]
+        self.turn_sequence_time_left[turning] -= self._env.step_dt
+        finished_turning = turning[self.turn_sequence_time_left[turning] <= 0.0]
+        if finished_turning.numel() > 0:
+            self.is_turn_sequence_turning[finished_turning] = False
+            self.is_turn_sequence_holding[finished_turning] = True
+            self.turn_sequence_time_left[finished_turning] = 0.0
+
+        self.vel_command_b[turn_env_ids, :] = 0.0
+        turning = turn_env_ids[self.is_turn_sequence_turning[turn_env_ids]]
+        self.vel_command_b[turning, 2] = self.turn_sequence_yaw_command[turning]
+
+
 class KeyboardVelocityCommand(UniformVelocityWithZeroCommand):
     """Command generator that exposes manual overrides for base velocity commands."""
 
@@ -347,3 +443,14 @@ class UniformVelocityWithZeroCommandCfg(CommandTermCfg):
     # Set the scale of the visualization markers to (0.5, 0.5, 0.5)
     goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
+
+
+@configclass
+class TurnSequenceVelocityCommandCfg(UniformVelocityWithZeroCommandCfg):
+    """Configuration for an isolated terrain-specific turn-then-hold sequence."""
+
+    class_type: type = TurnSequenceVelocityCommand
+    turn_terrain_types: tuple[str, ...] = ()
+    turn_sequence_probability: float = 0.0
+    turn_duration_range: tuple[float, float] = (1.0, 2.5)
+    yaw_speed_range: tuple[float, float] = (0.2, 0.5)
