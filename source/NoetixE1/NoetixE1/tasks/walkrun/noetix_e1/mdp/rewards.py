@@ -884,6 +884,43 @@ def corridor_world_x_progress_reward(
     return forward_speed * active.float()
 
 
+def corridor_heading_threshold_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    penalty_threshold: float,
+    penalty_limit: float,
+    target_heading: float = 0.0,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize corridor heading error only after it exceeds a dead zone."""
+    if penalty_threshold < 0.0:
+        raise ValueError(f"penalty_threshold must be non-negative, got {penalty_threshold}.")
+    if penalty_limit <= penalty_threshold:
+        raise ValueError(
+            f"penalty_limit must exceed penalty_threshold, got {penalty_limit} <= {penalty_threshold}."
+        )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    _, _, yaw = math_utils.euler_xyz_from_quat(asset.data.root_quat_w)
+    heading_error = torch.abs(math_utils.wrap_to_pi(yaw - float(target_heading)))
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    normalized_excess = (
+        (heading_error - float(penalty_threshold))
+        / float(penalty_limit - penalty_threshold)
+    ).clamp(min=0.0, max=1.0)
+    return torch.square(normalized_excess) * active.float()
+
+
 def corridor_lateral_threshold_penalty(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...],
@@ -922,6 +959,11 @@ def corridor_lateral_threshold_penalty(
         / float(penalty_limit - penalty_threshold)
     ).clamp(min=0.0, max=1.0)
     return torch.square(normalized_excess) * active.float()
+
+
+def termination_term_indicator(env: ManagerBasedRLEnv, term_name: str) -> torch.Tensor:
+    """Return the current value of one termination term as a reward signal."""
+    return env.termination_manager.get_term(term_name).float()
 
 
 def interlaced_corridor_ramp_step_up_lift_reward(

@@ -279,7 +279,7 @@ class CommandsCfg:
         },
         # TURN ABLATION: set probability to 0.0 to restore the original command distribution.
         turn_terrain_types=("interlaced_corridor_wedges",),
-        turn_sequence_probability=0.2,
+        turn_sequence_probability=0.1,
         turn_duration_range=(1.0, 5.0),
         yaw_speed_range=(0.2, 1.0),
     )
@@ -908,46 +908,48 @@ class RewardsCfg:
 
     # ------------------------------------- interlaced_corridor_wedges_approach -------------------------------------
 
-    approach_corridor_centerline_guidance = RewTerm(
-        func=mdp.corridor_centerline_exp,
-        weight=1.5,
-        params={
-            "std": 0.5,
-            "terrain_types": ("interlaced_corridor_wedges_approach",),
-            "min_forward_command": 0.3,
-            "local_x_range": (-4.0, -3.4),
-        },
-    )
     approach_corridor_centerline = RewTerm(
         func=mdp.corridor_centerline_exp,
-        weight=1.5,
+        weight=2.0,
         params={
             "std": 0.2,
             "terrain_types": ("interlaced_corridor_wedges_approach",),
             "min_forward_command": 0.3,
-            "local_x_range": (-3.4, 3.0),
+            "local_x_range": (-2.8, 3.0),
         },
     )
     approach_corridor_world_x_progress_guidance = RewTerm(
         func=mdp.corridor_world_x_progress_reward,
-        weight=0.3,
+        weight=0.5,
         params={
             "terrain_types": ("interlaced_corridor_wedges_approach",),
             "safe_half_width_m": 0.85,
             "max_forward_speed": 1.5,
             "min_forward_command": 0.3,
-            "local_x_range": (-4.0, -3.4),
+            "local_x_range": (-4.2, -2.8),
         },
     )
     approach_corridor_world_x_progress = RewTerm(
         func=mdp.corridor_world_x_progress_reward,
-        weight=0.3,
+        weight=0.5,
         params={
             "terrain_types": ("interlaced_corridor_wedges_approach",),
             "safe_half_width_m": 0.7,
             "max_forward_speed": 1.5,
             "min_forward_command": 0.3,
-            "local_x_range": (-3.4, 3.0),
+            "local_x_range": (-2.8, 3.0),
+        },
+    )
+    approach_corridor_heading_threshold = RewTerm(
+        func=mdp.corridor_heading_threshold_penalty,
+        weight=-2.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "penalty_threshold": 0.5235987755982988,  # 30 deg
+            "penalty_limit": 1.0471975511965976,  # 60 deg
+            "target_heading": 0.0,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.2, -2.8),
         },
     )
     approach_interlaced_ramp_step_up_lift = RewTerm(
@@ -975,8 +977,13 @@ class RewardsCfg:
             "penalty_threshold": 0.85,
             "penalty_limit": 1.5,
             "min_forward_command": 0.3,
-            "local_x_range": (-4.0, 3.0),
+            "local_x_range": (-4.2, 3.0),
         },
+    )
+    approach_corridor_lateral_exit_penalty = RewTerm(
+        func=mdp.termination_term_indicator,
+        weight=-50.0,  # With step_dt=0.02, the terminal-step contribution is -1.0.
+        params={"term_name": "approach_corridor_lateral_exit"},
     )
     # ------------------------------------------------- Base --------------------------------------------------
     flat_orientation_exp = RewTerm(func=mdp.flat_orientation_exp, weight=0.5, params={"std": 0.5})
@@ -1221,6 +1228,14 @@ class TerminationsCfg:
             "annulus_outer_margin_m": 0.08,
             "transition_y_extend_m": 0.12,
             "transition_x_margin_m": 0.06,
+        },
+    )
+    approach_corridor_lateral_exit = DoneTerm(
+        func=mdp.interlaced_corridor_lateral_exit,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_approach",),
+            "local_x_range": (-4.2, 3.0),
+            "max_abs_local_y": 1.55,  # 1.5 m half-width plus the 0.06 m edge fade.
         },
     )
     # (5) Out of Bounds

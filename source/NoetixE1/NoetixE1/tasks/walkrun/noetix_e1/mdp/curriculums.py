@@ -611,6 +611,10 @@ def terrain_levels_vel_with_termination(
     - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
 
+    **interlaced_corridor_wedges_approach**
+    - move_up：到达四段走廊末端且未横向越界
+    - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
+
     **其它地形**
     - 有前进速度指令：原距离课程
     - 无前进速度指令：超时不变档；仅 ``fall_down_in_some_terrain`` 降档（不含姿态类终止）
@@ -722,10 +726,14 @@ def terrain_levels_vel_with_termination(
         local_x = asset.data.root_pos_w[approach_env_ids, 0] - env.scene.env_origins[approach_env_ids, 0]
         reached_corridor_end = local_x >= 2.5
         stayed_before_entry = local_x <= -3.0
+        lateral_exit = env.termination_manager.get_term("approach_corridor_lateral_exit")[
+            approach_env_ids
+        ]
 
-        move_up[approach_local] = reached_corridor_end
+        move_up[approach_local] = reached_corridor_end & ~lateral_exit
         move_down[approach_local] = (
-            stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end
+            lateral_exit
+            | (stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end)
         )
 
     # 其它地形：保留原距离 / 速度课程

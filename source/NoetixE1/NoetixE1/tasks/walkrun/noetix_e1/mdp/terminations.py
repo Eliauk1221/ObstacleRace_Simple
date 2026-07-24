@@ -265,6 +265,37 @@ def figure8_bridge_riser_strike(
     terminate = on_terrain & foot_strike.any(dim=1)
     return terminate
 
+
+def interlaced_corridor_lateral_exit(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    local_x_range: tuple[float, float],
+    max_abs_local_y: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate after the root leaves the lateral boundary of an interlaced corridor."""
+    if max_abs_local_y <= 0.0:
+        raise ValueError(f"max_abs_local_y must be positive, got {max_abs_local_y}.")
+    x_lo, x_hi = local_x_range
+    if x_hi <= x_lo:
+        raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        on_terrain = _check_terrain_types_from_positions(env, asset.data.root_pos_w, terrain_types)
+    else:
+        on_terrain = _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+    in_corridor_x = (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+    outside_lateral_boundary = torch.abs(local_xy[:, 1]) > float(max_abs_local_y)
+    return on_terrain & in_corridor_x & outside_lateral_boundary
+
+
 def terrain_out_of_bounds(
     env: ManagerBasedRLEnv,
     asset_cfg: str = "robot",
