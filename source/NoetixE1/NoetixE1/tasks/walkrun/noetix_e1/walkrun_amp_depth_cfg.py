@@ -618,7 +618,13 @@ class EventCfg:
             },
             "terrain_specific_spawn_z_offset": {
                 "interlaced_corridor_wedges": -0.2,
-                "interlaced_corridor_wedges_approach": -0.6,
+            },
+            "terrain_specific_spawn_local_ground": {
+                "interlaced_corridor_wedges_approach": {
+                    "ground_height_m": 0.0,
+                    # Preserve the working 15 deg reset: origin_z (0.67 m) - old offset (0.60 m).
+                    "root_height_offset_m": 0.07,
+                },
             },
             "terrain_specific_figure8_spawn": {
                 "spawn_mode": "center_cutout",
@@ -1246,6 +1252,9 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
+    # Keep diagnostics before terrain_levels so terminal positions are read before terrain origins change.
+    approach_entry_rate = CurrTerm(func=mdp.interlaced_corridor_approach_entry_rate)
+    approach_completion_rate = CurrTerm(func=mdp.interlaced_corridor_approach_completion_rate)
     # terrain_levels = CurrTerm(func=mdp.terrain_levels_adaptive)
     # terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
     terrain_levels = CurrTerm(func=mdp.terrain_levels_vel_with_termination)

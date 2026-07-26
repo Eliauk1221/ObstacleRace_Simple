@@ -204,6 +204,48 @@ def _apply_terrain_specific_spawn_z_offset(
             positions[is_this_terrain, 2] += float(dz)
 
 
+def _apply_terrain_specific_spawn_local_ground(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    positions: torch.Tensor,
+    positions_include_origin_z: torch.Tensor,
+    terrain_specific_spawn_local_ground: dict[str, dict[str, float]] | None,
+    device: torch.device,
+) -> None:
+    """Reference root z to a known terrain-local spawn height instead of terrain origin z."""
+    if not terrain_specific_spawn_local_ground:
+        return
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
+
+    env_id_str = str(id(env))
+    if env_id_str not in _adaptive_terrain_state:
+        return
+    terrain_type_names_to_col_map = _adaptive_terrain_state[env_id_str]["terrain_type_names_to_col_map"]
+    terrain_types_for_envs = env.scene.terrain.terrain_types[env_ids]
+    origin_z = env.scene.env_origins[env_ids, 2]
+
+    for terrain_type, spawn_cfg in terrain_specific_spawn_local_ground.items():
+        if terrain_type not in terrain_type_names_to_col_map:
+            continue
+        is_this_terrain = _terrain_env_mask(
+            terrain_types_for_envs,
+            terrain_type_names_to_col_map[terrain_type],
+            len(env_ids),
+            device,
+        )
+        if not is_this_terrain.any():
+            continue
+
+        ground_height_m = float(spawn_cfg.get("ground_height_m", 0.0))
+        root_height_offset_m = float(spawn_cfg.get("root_height_offset_m", 0.0))
+        included_origin_z = torch.where(
+            positions_include_origin_z[is_this_terrain],
+            origin_z[is_this_terrain],
+            torch.zeros_like(origin_z[is_this_terrain]),
+        )
+        positions[is_this_terrain, 2] += ground_height_m + root_height_offset_m - included_origin_z
+
+
 def reset_root_state_amp(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -220,6 +262,7 @@ def reset_root_state_amp(
     terrain_specific_motion_level_range: tuple[int, int] | None = None,
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
     terrain_specific_spawn_z_offset: dict[str, float] | None = None,
+    terrain_specific_spawn_local_ground: dict[str, dict[str, float]] | None = None,
     terrain_specific_figure8_spawn: dict | None = None,
 ):
     # extract the used quantities (to enable type-hinting)
@@ -236,6 +279,7 @@ def reset_root_state_amp(
     range_list = [root_pos_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
     ranges = torch.tensor(range_list, device=asset.device)
     rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
+    positions_include_origin_z = torch.ones(len(env_ids), dtype=torch.bool, device=asset.device)
 
     # Handle terrain-specific configurations (yaw angles and position ranges)
     if (terrain_specific_yaw is not None and len(terrain_specific_yaw) > 0) or \
@@ -429,6 +473,7 @@ def reset_root_state_amp(
         # Positions: 地形专属 motion 时完全采用 motion 位置 + 地形原点偏置；否则在原点附近随机 x,y，z 用 motion
         positions = torch.empty((len(env_ids), 3), device=env.device, dtype=raw_amp_positions.dtype)
         origins = env.scene.env_origins[env_ids]
+        positions_include_origin_z = ~use_full_motion_state
         positions[~use_full_motion_state, 0] = origins[~use_full_motion_state, 0] + rand_samples[~use_full_motion_state, 0]
         positions[~use_full_motion_state, 1] = origins[~use_full_motion_state, 1] + rand_samples[~use_full_motion_state, 1]
         positions[~use_full_motion_state, 2] = raw_amp_positions[~use_full_motion_state, 2] + origins[~use_full_motion_state, 2] + 0.05
@@ -546,6 +591,14 @@ def reset_root_state_amp(
 
     _apply_terrain_specific_spawn_z_offset(
         env, env_ids, positions, terrain_specific_spawn_z_offset, asset.device
+    )
+    _apply_terrain_specific_spawn_local_ground(
+        env,
+        env_ids,
+        positions,
+        positions_include_origin_z,
+        terrain_specific_spawn_local_ground,
+        asset.device,
     )
 
     # clamp joint pos to limits
