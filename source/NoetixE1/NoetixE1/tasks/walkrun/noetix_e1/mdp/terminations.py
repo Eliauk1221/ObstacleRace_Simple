@@ -115,6 +115,187 @@ def _figure8_bridge_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, tor
     return inner_r, bridge_width_m, cutout_w, cutout_l
 
 
+def _s_curve_width_for_terrain_levels(env: ManagerBasedRLEnv, sub) -> torch.Tensor:
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    widths = tuple(getattr(sub, "path_width_by_level", ()) or ())
+    if len(widths) > 0:
+        widths_t = torch.tensor(widths, dtype=torch.float, device=env.device)
+        level_max = len(widths) - 1
+        num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+        if num_rows > 1:
+            level_idx = torch.round(
+                env.scene.terrain.terrain_levels.float().clamp(0, num_rows - 1)
+                / float(num_rows - 1)
+                * level_max
+            ).long()
+        else:
+            difficulty_range = getattr(terrain_gen_cfg, "difficulty_range", None)
+            difficulty = float(difficulty_range[0]) if difficulty_range is not None else 0.0
+            level_idx = torch.full(
+                (env.num_envs,),
+                int(round(max(0.0, min(1.0, difficulty)) * level_max)),
+                dtype=torch.long,
+                device=env.device,
+            )
+        return widths_t[level_idx.clamp(0, level_max)]
+
+    width_lo, width_hi = getattr(sub, "path_width_range", (0.85, 0.4))
+    num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+    if num_rows > 1:
+        difficulty = env.scene.terrain.terrain_levels.float() / float(num_rows - 1)
+    else:
+        difficulty_range = getattr(terrain_gen_cfg, "difficulty_range", None)
+        difficulty_value = float(difficulty_range[0]) if difficulty_range is not None else 0.0
+        difficulty = torch.full((env.num_envs,), difficulty_value, dtype=torch.float, device=env.device)
+    return float(width_lo) + difficulty.clamp(0.0, 1.0) * float(width_hi - width_lo)
+
+
+def _s_curve_sub_terrain_name(terrain_types: list[str] | tuple[str, ...]) -> str:
+    if not terrain_types:
+        return "s_curve"
+    return str(terrain_types[0])
+
+
+def _s_curve_geometry_per_env(
+    env: ManagerBasedRLEnv, terrain_types: list[str] | tuple[str, ...] = ("s_curve",)
+) -> tuple[float, torch.Tensor, tuple[float, float], bool]:
+    sub_terrain_name = _s_curve_sub_terrain_name(terrain_types)
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get(sub_terrain_name)
+    if sub is None:
+        raise KeyError(f"{sub_terrain_name} sub_terrain not found in terrain_generator.sub_terrains")
+    radius_m = float(sub.radius_m)
+    path_width_m = _s_curve_width_for_terrain_levels(env, sub)
+    center_offset_m = tuple(float(v) for v in getattr(sub, "center_offset_m", (0.0, 0.0)))
+    mirror_x = bool(getattr(sub, "mirror_x", False))
+    return radius_m, path_width_m, center_offset_m, mirror_x
+
+
+def _s_curve_region_masks(
+    foot_xy: torch.Tensor,
+    radius_m: float,
+    path_width_m: torch.Tensor,
+    center_offset_m: tuple[float, float],
+    start_region_xy_range: tuple[float, float, float, float],
+    end_region_xy_range: tuple[float, float, float, float],
+    mirror_x: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    center = torch.tensor(center_offset_m, dtype=foot_xy.dtype, device=foot_xy.device)
+    rel = foot_xy - center.view(1, 1, 2)
+    bridge_rel = rel.clone()
+    if mirror_x:
+        bridge_rel[..., 0] = -bridge_rel[..., 0]
+    half_width = 0.5 * path_width_m.view(-1, 1)
+    band_lo = (float(radius_m) - half_width).clamp(min=0.0)
+    band_hi = float(radius_m) + half_width
+
+    upper_center = torch.tensor((0.0, radius_m), dtype=foot_xy.dtype, device=foot_xy.device)
+    lower_center = torch.tensor((0.0, -radius_m), dtype=foot_xy.dtype, device=foot_xy.device)
+    upper_rel = bridge_rel - upper_center.view(1, 1, 2)
+    lower_rel = bridge_rel - lower_center.view(1, 1, 2)
+    upper_dist = torch.norm(upper_rel, dim=-1)
+    lower_dist = torch.norm(lower_rel, dim=-1)
+    on_upper = (bridge_rel[..., 0] >= 0.0) & (upper_dist >= band_lo) & (upper_dist <= band_hi)
+    on_lower = (bridge_rel[..., 0] <= 0.0) & (lower_dist >= band_lo) & (lower_dist <= band_hi)
+    on_bridge = on_upper | on_lower
+
+    start_x_lo, start_x_hi, start_y_lo, start_y_hi = [float(v) for v in start_region_xy_range]
+    end_x_lo, end_x_hi, end_y_lo, end_y_hi = [float(v) for v in end_region_xy_range]
+    in_start = (
+        (rel[..., 0] >= min(start_x_lo, start_x_hi))
+        & (rel[..., 0] <= max(start_x_lo, start_x_hi))
+        & (rel[..., 1] >= min(start_y_lo, start_y_hi))
+        & (rel[..., 1] <= max(start_y_lo, start_y_hi))
+    )
+    in_end = (
+        (rel[..., 0] >= min(end_x_lo, end_x_hi))
+        & (rel[..., 0] <= max(end_x_lo, end_x_hi))
+        & (rel[..., 1] >= min(end_y_lo, end_y_hi))
+        & (rel[..., 1] <= max(end_y_lo, end_y_hi))
+    )
+    return on_bridge, in_start, in_end, on_bridge | in_start | in_end
+
+
+def s_curve_reach_end_timeout(
+    env: ManagerBasedRLEnv,
+    terrain_types: list[str] | tuple[str, ...] = ("s_curve",),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    ),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    contact_force_threshold: float = 0.5,
+    start_region_xy_range: tuple[float, float, float, float] = (-0.9, 0.9, -3.6, -2.8),
+    end_region_xy_range: tuple[float, float, float, float] = (-0.9, 0.9, 2.8, 3.6),
+) -> torch.Tensor:
+    """S 弯：脚接触终点区域时按 timeout 成功结束。"""
+    on_terrain = _figure8_on_terrain_mask(env, terrain_types)
+    if not on_terrain.any():
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    radius_m, path_width_m, center_offset_m, mirror_x = _s_curve_geometry_per_env(env, terrain_types)
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    foot_body_ids = contact_sensor_cfg.body_ids
+    foot_xy = asset.data.body_pos_w[:, foot_body_ids, :2] - env.scene.env_origins[:, :2].unsqueeze(1)
+    _, _, in_end, _ = _s_curve_region_masks(
+        foot_xy,
+        radius_m,
+        path_width_m,
+        center_offset_m,
+        start_region_xy_range=start_region_xy_range,
+        end_region_xy_range=end_region_xy_range,
+        mirror_x=mirror_x,
+    )
+
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(torch.norm(net_contact_forces[:, :, foot_body_ids, :], dim=-1), dim=1)[0]
+        > float(contact_force_threshold)
+    )
+    reached_end = feet_contact.all(dim=1) & in_end.all(dim=1)
+    return on_terrain & reached_end
+
+
+def s_curve_invalid_contact(
+    env: ManagerBasedRLEnv,
+    terrain_types: list[str] | tuple[str, ...] = ("s_curve",),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    ),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    contact_force_threshold: float = 0.5,
+    start_region_xy_range: tuple[float, float, float, float] = (-0.9, 0.9, -3.6, -2.8),
+    end_region_xy_range: tuple[float, float, float, float] = (-0.9, 0.9, 2.8, 3.6),
+) -> torch.Tensor:
+    """S 弯：脚接触桥面、起点、终点以外区域则失败终止。"""
+    on_terrain = _figure8_on_terrain_mask(env, terrain_types)
+    if not on_terrain.any():
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    radius_m, path_width_m, center_offset_m, mirror_x = _s_curve_geometry_per_env(env, terrain_types)
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    foot_body_ids = contact_sensor_cfg.body_ids
+    foot_xy = asset.data.body_pos_w[:, foot_body_ids, :2] - env.scene.env_origins[:, :2].unsqueeze(1)
+    _, _, _, valid = _s_curve_region_masks(
+        foot_xy,
+        radius_m,
+        path_width_m,
+        center_offset_m,
+        start_region_xy_range=start_region_xy_range,
+        end_region_xy_range=end_region_xy_range,
+        mirror_x=mirror_x,
+    )
+
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(torch.norm(net_contact_forces[:, :, foot_body_ids, :], dim=-1), dim=1)[0]
+        > float(contact_force_threshold)
+    )
+    invalid_contact = (feet_contact & (~valid)).any(dim=1)
+    return on_terrain & invalid_contact
+
+
 def figure8_bridge_fall_off(
     env: ManagerBasedRLEnv,
     terrain_types: list[str] | tuple[str, ...],

@@ -484,3 +484,40 @@ class MeshFigure8BridgeTerrainCfg(SubTerrainBaseCfg):
 
     center_cutout_length_m: float = 0.0
     """原点矩形挖空长度（米，沿 y）；0 表示关闭。"""
+
+
+@configclass
+class MeshSCurveTerrainCfg(SubTerrainBaseCfg):
+    """Trimesh 参数化 S 型高台：由两个相切的标准半圆组成。
+
+    默认 S 中心在子地形原点，两个半圆半径 1.6 m；路径宽度随地形等级逐渐变窄。
+    """
+
+    function = figure8_mesh_terrains.s_curve_mesh_terrain
+
+    size: tuple[float, float] = (8.0, 8.0)
+    """单格场地边长（米）。"""
+
+    radius_m: float = 1.6
+    """两个标准半圆的中心线半径（米）。"""
+
+    height_m: float = 0.1
+    """兼容旧配置：未设置 ``height_range_m`` 时使用的固定高台高度（米）。"""
+
+    height_range_m: tuple[float, float] | None = (0.05, 0.2)
+    """S 型高台相对于平地的顶面高度范围（米），按 difficulty 从低到高线性插值。"""
+
+    path_width_range: tuple[float, float] = (0.85, 0.4)
+    """未设置 ``path_width_by_level`` 时在区间内线性插值；通常从宽到窄。"""
+
+    path_width_by_level: tuple[float, ...] = (0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4)
+    """离散等级路径宽度（米）：与 num_rows=10 对齐，level 越高越窄。"""
+
+    center_offset_m: tuple[float, float] = (0.0, 0.0)
+    """S 型中心点相对子地形原点的偏移（米，x/y）。"""
+
+    mirror_x: bool = False
+    """是否沿子地形局部 y 轴镜像 S 型，即 x -> -x。"""
+
+    samples_per_semicircle: int = 64
+    """每个半圆的离散段数（越大越光滑）。"""

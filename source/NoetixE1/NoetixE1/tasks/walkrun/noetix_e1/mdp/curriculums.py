@@ -653,6 +653,9 @@ def terrain_levels_vel_with_termination(
     standard_terrain_curriculum_half_extent_m: float | None = None,
     approach_entry_local_x_m: float = _INTERLACED_APPROACH_ENTRY_LOCAL_X_M,
     approach_completion_local_x_m: float = _INTERLACED_APPROACH_COMPLETION_LOCAL_X_M,
+    s_curve_terrain_types: tuple[str, ...] | list[str] = (),
+    s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
+    s_curve_half_local_x: float = 0.0,
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
@@ -740,7 +743,8 @@ def terrain_levels_vel_with_termination(
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
     is_interlaced_approach = _env_ids_on_terrain_types(env, env_ids_tensor, _INTERLACED_APPROACH_TERRAIN_TYPES)
-    other_terrain = ~(is_figure8 | is_interlaced_approach)
+    is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
+    other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve)
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -813,6 +817,47 @@ def terrain_levels_vel_with_termination(
             fell_down = env.termination_manager.get_term("fall_down_in_some_terrain")[sub_env_ids]
             move_down[sub] = fell_down
             move_down[sub] *= ~move_up[sub]
+
+    # S 弯到达终点才升档；未过半程即失败则降档，过半后失败保持等级。
+    if is_s_curve.any():
+        current_cols = terrain.terrain_types[env_ids_tensor].long()
+        names_to_cols = get_terrain_type_names_to_col_map(env)
+        mirrored_s_curve_cols = []
+        for terrain_type in s_curve_terrain_types:
+            sub = getattr(terrain_gen_cfg, "sub_terrains", {}).get(terrain_type)
+            if bool(getattr(sub, "mirror_x", False)):
+                mirrored_s_curve_cols.extend(names_to_cols.get(terrain_type, []))
+
+        local_x = asset.data.root_pos_w[env_ids_tensor, 0] - env.scene.env_origins[env_ids_tensor, 0]
+        reached_end = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
+        reach_terms = (
+            (s_curve_reach_end_term,)
+            if isinstance(s_curve_reach_end_term, str)
+            else tuple(s_curve_reach_end_term)
+        )
+        for term_name in reach_terms:
+            try:
+                reached_end |= env.termination_manager.get_term(term_name)[env_ids_tensor]
+            except KeyError:
+                pass
+
+        passed_half_normal = local_x < float(s_curve_half_local_x)
+        if mirrored_s_curve_cols:
+            mirrored_cols_t = torch.tensor(
+                mirrored_s_curve_cols, dtype=current_cols.dtype, device=env.device
+            )
+            is_mirrored_s_curve = (
+                current_cols.unsqueeze(1) == mirrored_cols_t.unsqueeze(0)
+            ).any(dim=1)
+            passed_half_mirrored = local_x > float(s_curve_half_local_x)
+            passed_half = torch.where(is_mirrored_s_curve, passed_half_mirrored, passed_half_normal)
+        else:
+            passed_half = passed_half_normal
+
+        s_curve_move_up = reached_end
+        s_curve_move_down = ~reached_end & ~passed_half
+        move_up = torch.where(is_s_curve, s_curve_move_up, move_up)
+        move_down = torch.where(is_s_curve, s_curve_move_down, move_down)
 
     # update terrain levels
     terrain.update_env_origins(env_ids, move_up, move_down)

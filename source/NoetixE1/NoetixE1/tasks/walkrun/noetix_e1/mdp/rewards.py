@@ -29,7 +29,10 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
 
 
 def track_lin_vel_xy_yaw_frame_exp(
-    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    std: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
@@ -37,7 +40,14 @@ def track_lin_vel_xy_yaw_frame_exp(
     )
     command = env.command_manager.get_command("base_velocity")
     lin_vel_error = torch.sum(torch.square(command[:, :2] - vel_yaw[:, :2]), dim=1)
-    return torch.exp(-lin_vel_error / std**2)
+    reward = torch.exp(-lin_vel_error / std**2)
+    if skip_terrain_types:
+        reward = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, reward.device),
+            torch.zeros_like(reward),
+            reward,
+        )
+    return reward
 
 
 def track_lin_vel_xy_yaw_frame_exp_terrain_full(
@@ -82,8 +92,9 @@ def track_ang_vel_z_world_exp(
     std: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     skip_terrain_types: tuple[str, ...] | None = None,
+    zero_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
-    """Track yaw rate command. On ``skip_terrain_types`` terrains return 1.0 so the policy may turn freely."""
+    """Track yaw rate, with separate constant-one and zero masks for terrain-specific objectives."""
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command("base_velocity")
     ang_vel_error = torch.square(command[:, 2] - asset.data.root_ang_vel_w[:, 2])
@@ -91,6 +102,9 @@ def track_ang_vel_z_world_exp(
     if skip_terrain_types:
         on_terrain = _terrain_type_mask(env, skip_terrain_types, reward.device)
         reward = torch.where(on_terrain, torch.ones_like(reward), reward)
+    if zero_terrain_types:
+        on_terrain = _terrain_type_mask(env, zero_terrain_types, reward.device)
+        reward = torch.where(on_terrain, torch.zeros_like(reward), reward)
     return reward
 
 
@@ -567,7 +581,9 @@ def delta_yaw_penalty_exp(
 
 
 def lin_vel_dir_reward(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command("base_velocity")
@@ -579,6 +595,12 @@ def lin_vel_dir_reward(
     desired_lin_vel_dir = torch.nn.functional.normalize(command[:, :2], dim=-1)
     punish = 1 - torch.sum(lin_vel_dir * desired_lin_vel_dir, dim=-1)
     punish = punish * (torch.norm(command[:, :2], dim=-1) > 0.1)
+    if skip_terrain_types:
+        punish = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, punish.device),
+            torch.zeros_like(punish),
+            punish,
+        )
     return punish
 
 
@@ -1070,6 +1092,265 @@ def _terrain_type_mask(
         asset: Articulation = env.scene["robot"]
         return _check_terrain_types_from_positions(env, asset.data.root_link_pos_w, terrain_types)
     return _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
+
+
+def _s_curve_width_for_terrain_levels(env: ManagerBasedRLEnv, sub) -> torch.Tensor:
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    widths = tuple(getattr(sub, "path_width_by_level", ()) or ())
+    if len(widths) > 0:
+        widths_t = torch.tensor(widths, dtype=torch.float, device=env.device)
+        level_max = len(widths) - 1
+        num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+        if num_rows > 1:
+            level_idx = torch.round(
+                env.scene.terrain.terrain_levels.float().clamp(0, num_rows - 1)
+                / float(num_rows - 1)
+                * level_max
+            ).long()
+        else:
+            difficulty_range = getattr(terrain_gen_cfg, "difficulty_range", None)
+            difficulty = float(difficulty_range[0]) if difficulty_range is not None else 0.0
+            level_idx = torch.full(
+                (env.num_envs,),
+                int(round(max(0.0, min(1.0, difficulty)) * level_max)),
+                dtype=torch.long,
+                device=env.device,
+            )
+        return widths_t[level_idx.clamp(0, level_max)]
+
+    width_lo, width_hi = getattr(sub, "path_width_range", (0.85, 0.4))
+    num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+    if num_rows > 1:
+        difficulty = env.scene.terrain.terrain_levels.float() / float(num_rows - 1)
+    else:
+        difficulty_range = getattr(terrain_gen_cfg, "difficulty_range", None)
+        difficulty_value = float(difficulty_range[0]) if difficulty_range is not None else 0.0
+        difficulty = torch.full((env.num_envs,), difficulty_value, dtype=torch.float, device=env.device)
+    return float(width_lo) + difficulty.clamp(0.0, 1.0) * float(width_hi - width_lo)
+
+
+def _s_curve_sub_terrain_name(terrain_types: tuple[str, ...] | list[str]) -> str:
+    if not terrain_types:
+        return "s_curve"
+    return str(terrain_types[0])
+
+
+def _s_curve_geometry_per_env(
+    env: ManagerBasedRLEnv, terrain_types: tuple[str, ...] | list[str] = ("s_curve",)
+) -> tuple[float, torch.Tensor, tuple[float, float], bool]:
+    sub_terrain_name = _s_curve_sub_terrain_name(terrain_types)
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    sub = terrain_gen_cfg.sub_terrains.get(sub_terrain_name)
+    if sub is None:
+        raise KeyError(f"{sub_terrain_name} sub_terrain not found in terrain_generator.sub_terrains")
+    radius_m = float(sub.radius_m)
+    path_width_m = _s_curve_width_for_terrain_levels(env, sub)
+    center_offset_m = tuple(float(v) for v in getattr(sub, "center_offset_m", (0.0, 0.0)))
+    mirror_x = bool(getattr(sub, "mirror_x", False))
+    return radius_m, path_width_m, center_offset_m, mirror_x
+
+
+def _has_s_curve_sub_terrain(
+    env: ManagerBasedRLEnv, terrain_types: tuple[str, ...] | list[str] = ("s_curve",)
+) -> bool:
+    sub_terrain_name = _s_curve_sub_terrain_name(terrain_types)
+    terrain_gen_cfg = getattr(env.scene.terrain.cfg, "terrain_generator", None)
+    sub_terrains = getattr(terrain_gen_cfg, "sub_terrains", None)
+    return sub_terrains is not None and sub_terrain_name in sub_terrains
+
+
+def _get_s_curve_centerline(
+    env: ManagerBasedRLEnv,
+    radius_m: float,
+    samples_per_semicircle: int,
+    mirror_x: bool,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """S 弯中心线采样，正方向为底部起点 -> 顶部终点。
+
+    返回点、切线方向、以及每个点指向所属半圆圆心的“内侧”方向。
+    """
+    cache_key = "_s_curve_centerline_cache"
+    cache = getattr(env.unwrapped, cache_key, None)
+    if cache is None:
+        cache = {}
+        setattr(env.unwrapped, cache_key, cache)
+
+    samples_per_semicircle = max(int(samples_per_semicircle), 8)
+    key = (float(radius_m), samples_per_semicircle, bool(mirror_x), str(device))
+    if key in cache:
+        return cache[key]
+
+    r = float(radius_m)
+    lower_theta = torch.linspace(1.5 * math.pi, 0.5 * math.pi, samples_per_semicircle, device=device)
+    upper_theta = torch.linspace(-0.5 * math.pi, 0.5 * math.pi, samples_per_semicircle, device=device)
+
+    lower_pts = torch.stack(
+        (r * torch.cos(lower_theta), -r + r * torch.sin(lower_theta)),
+        dim=1,
+    )
+    upper_pts = torch.stack(
+        (r * torch.cos(upper_theta), r + r * torch.sin(upper_theta)),
+        dim=1,
+    )
+    lower_tangent = torch.stack((torch.sin(lower_theta), -torch.cos(lower_theta)), dim=1)
+    upper_tangent = torch.stack((-torch.sin(upper_theta), torch.cos(upper_theta)), dim=1)
+    lower_inward = torch.stack((-torch.cos(lower_theta), -torch.sin(lower_theta)), dim=1)
+    upper_inward = torch.stack((-torch.cos(upper_theta), -torch.sin(upper_theta)), dim=1)
+
+    points = torch.cat((lower_pts, upper_pts[1:]), dim=0)
+    tangents = torch.cat((lower_tangent, upper_tangent[1:]), dim=0)
+    inward_dirs = torch.cat((lower_inward, upper_inward[1:]), dim=0)
+    if mirror_x:
+        points[:, 0] = -points[:, 0]
+        tangents[:, 0] = -tangents[:, 0]
+        inward_dirs[:, 0] = -inward_dirs[:, 0]
+    tangents = tangents / torch.clamp(torch.norm(tangents, dim=1, keepdim=True), min=1e-6)
+    inward_dirs = inward_dirs / torch.clamp(torch.norm(inward_dirs, dim=1, keepdim=True), min=1e-6)
+    cache[key] = (points, tangents, inward_dirs)
+    return points, tangents, inward_dirs
+
+
+def _bias_s_curve_tangent_to_inward(
+    tangent: torch.Tensor,
+    inward_dir: torch.Tensor,
+    inward_tangent_bias_deg: float,
+) -> torch.Tensor:
+    angle = math.radians(float(inward_tangent_bias_deg))
+    if abs(angle) <= 1e-6:
+        return tangent
+    biased_tangent = math.cos(angle) * tangent + math.sin(angle) * inward_dir
+    return biased_tangent / torch.clamp(torch.norm(biased_tangent, dim=1, keepdim=True), min=1e-6)
+
+
+def _s_curve_project_to_centerline(
+    env: ManagerBasedRLEnv,
+    local_xy: torch.Tensor,
+    samples_per_semicircle: int,
+    inward_centerline_offset_m: float = 0.0,
+    terrain_types: tuple[str, ...] | list[str] = ("s_curve",),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """返回最近中心线点、切线、横向距离、桥宽和内侧方向。"""
+    radius_m, path_width_m, center_offset_m, mirror_x = _s_curve_geometry_per_env(env, terrain_types)
+    points, tangents, inward_dirs = _get_s_curve_centerline(
+        env, radius_m, samples_per_semicircle, mirror_x, local_xy.device
+    )
+    center = torch.tensor(center_offset_m, dtype=local_xy.dtype, device=local_xy.device)
+    rel_xy = local_xy - center.view(1, 2)
+    delta = rel_xy.unsqueeze(1) - points.unsqueeze(0)
+    dist = torch.norm(delta, dim=-1)
+    nearest_idx = torch.argmin(dist, dim=1)
+    nearest_points = points[nearest_idx]
+    nearest_tangent = tangents[nearest_idx]
+    nearest_inward = inward_dirs[nearest_idx]
+    nearest_points = nearest_points + float(inward_centerline_offset_m) * nearest_inward
+    lateral_distance = torch.norm(rel_xy - nearest_points, dim=1)
+    nearest_points = nearest_points + center.view(1, 2)
+    return nearest_points, nearest_tangent, lateral_distance, path_width_m, nearest_inward
+
+
+def s_curve_path_forward_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("s_curve",),
+    std: float = 0.25,
+    min_cmd_speed: float = 0.1,
+    samples_per_semicircle: int = 64,
+    inward_tangent_bias_deg: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """S 弯切线方向速度跟踪：切线可向所属半圆圆心内侧偏转。"""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (torch.abs(cmd_x) > min_cmd_speed)
+    if not active.any() or not _has_s_curve_sub_terrain(env, terrain_types):
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    _, tangent, _, _, inward_dir = _s_curve_project_to_centerline(
+        env, local_xy, samples_per_semicircle, terrain_types=terrain_types
+    )
+    tangent = _bias_s_curve_tangent_to_inward(tangent, inward_dir, inward_tangent_bias_deg)
+
+    v_along = (asset.data.root_lin_vel_w[:, :2] * tangent).sum(dim=1)
+    reward = torch.exp(-torch.square(v_along - cmd_x) / (std**2))
+    return reward * active.float()
+
+
+def s_curve_heading_tangent_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("s_curve",),
+    std: float = 0.5,
+    min_cmd_speed: float = 0.1,
+    samples_per_semicircle: int = 64,
+    inward_tangent_bias_deg: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """S 弯航向跟踪：root yaw 对齐可向圆心内侧偏转的路径方向。"""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command("base_velocity")
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (torch.abs(command[:, 0]) > min_cmd_speed)
+    if not active.any() or not _has_s_curve_sub_terrain(env, terrain_types):
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    _, tangent, _, _, inward_dir = _s_curve_project_to_centerline(
+        env, local_xy, samples_per_semicircle, terrain_types=terrain_types
+    )
+    tangent = _bias_s_curve_tangent_to_inward(tangent, inward_dir, inward_tangent_bias_deg)
+
+    quat = asset.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    body_forward = torch.stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (w * z + x * y),
+        ),
+        dim=1,
+    )
+    body_forward = body_forward / torch.clamp(torch.norm(body_forward, dim=1, keepdim=True), min=1e-6)
+    dot = torch.clamp((body_forward * tangent).sum(dim=1), min=-1.0, max=1.0)
+    cross_z = body_forward[:, 0] * tangent[:, 1] - body_forward[:, 1] * tangent[:, 0]
+    yaw_error = torch.atan2(cross_z, dot)
+    reward = torch.exp(-torch.square(yaw_error) / (std**2))
+    return reward * active.float()
+
+
+def s_curve_centerline_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("s_curve",),
+    std: float = 0.25,
+    edge_buffer_m: float = 0.05,
+    samples_per_semicircle: int = 64,
+    inward_centerline_offset_m: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """S 弯中心保持：参考中心线可向所属半圆圆心内侧偏移。"""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    if not active.any() or not _has_s_curve_sub_terrain(env, terrain_types):
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    _, _, lateral_distance, path_width_m, _ = _s_curve_project_to_centerline(
+        env, local_xy, samples_per_semicircle, inward_centerline_offset_m, terrain_types
+    )
+
+    center_reward = torch.exp(-torch.square(lateral_distance) / (std**2))
+    half_width = 0.5 * path_width_m
+    edge_margin = half_width - lateral_distance
+    edge_scale = torch.clamp(edge_margin / max(float(edge_buffer_m), 1e-6), min=0.0, max=1.0)
+    reward = center_reward * edge_scale
+    return reward * active.float()
 
 def _get_figure8_polyline(
     env: ManagerBasedRLEnv,

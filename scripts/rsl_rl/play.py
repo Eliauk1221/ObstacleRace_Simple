@@ -49,11 +49,14 @@ parser.add_argument(
         "interlaced_corridor_wedges",
         "interlaced_corridor_wedges_approach",
         "figure8_bridge",
+        "s_curve",
+        "s_curve_reverse",
     ],
     help=(
         "Single-cell demo terrain: interlaced_corridor_wedges (首段中心出生), "
         "interlaced_corridor_wedges_approach (坡前低侧出生), "
-        "figure8_bridge (闭合 8 字桥, Trimesh). "
+        "figure8_bridge (闭合 8 字桥, Trimesh), "
+        "s_curve / s_curve_reverse (正向/镜像 S 弯, Trimesh). "
         "Empty string disables."
     ),
 )
@@ -379,6 +382,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         center_cutout_width_m=0.8,
                         center_cutout_length_m=0.8,
                         samples_per_loop=128,
+                    )
+                }
+            elif st in ("s_curve", "s_curve_reverse"):
+                env_cfg.scene.terrain.terrain_generator.size = (8.0, 8.0)
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshSCurveTerrainCfg(
+                        proportion=1.0,
+                        size=(8.0, 8.0),
+                        radius_m=1.6,
+                        height_range_m=(0.08, 0.12),
+                        path_width_by_level=(1.0, 0.9, 0.81, 0.73, 0.66, 0.6, 0.55, 0.5, 0.45, 0.4),
+                        center_offset_m=(0.0, 0.0),
+                        mirror_x=st == "s_curve_reverse",
+                        samples_per_semicircle=64,
                     )
                 }
 
