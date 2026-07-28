@@ -25,11 +25,6 @@ if TYPE_CHECKING:
 # Global state for adaptive terrain sampling (similar to mimic task's adaptive sampling)
 _adaptive_terrain_state: dict[str, dict] = {}
 
-_INTERLACED_APPROACH_TERRAIN_TYPES = ("interlaced_corridor_wedges_approach",)
-_INTERLACED_APPROACH_ENTRY_LOCAL_X_M = -2.8
-_INTERLACED_APPROACH_COMPLETION_LOCAL_X_M = 2.5
-
-
 def _get_terrain_type_from_position(
     env: ManagerBasedRLEnv,
     positions_w: torch.Tensor,
@@ -600,59 +595,11 @@ def _standard_terrain_curriculum_half_extent(terrain_gen_cfg) -> float:
     return 0.5 * float(getattr(terrain_gen_cfg, "standard_feature_extent_m", 8.0))
 
 
-def _interlaced_corridor_approach_progress_rate(
-    env: ManagerBasedRLEnv,
-    env_ids: Sequence[int],
-    local_x_threshold_m: float,
-    reject_lateral_exit: bool,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor | None:
-    asset: Articulation = env.scene[asset_cfg.name]
-    env_ids_tensor = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
-    is_approach = _env_ids_on_terrain_types(env, env_ids_tensor, _INTERLACED_APPROACH_TERRAIN_TYPES)
-    if not is_approach.any():
-        return None
-
-    approach_env_ids = env_ids_tensor[is_approach]
-    local_x = asset.data.root_pos_w[approach_env_ids, 0] - env.scene.env_origins[approach_env_ids, 0]
-    reached = local_x >= float(local_x_threshold_m)
-    if reject_lateral_exit:
-        lateral_exit = env.termination_manager.get_term("approach_corridor_lateral_exit")[approach_env_ids]
-        reached &= ~lateral_exit
-    return reached.float().mean()
-
-
-def interlaced_corridor_approach_entry_rate(
-    env: ManagerBasedRLEnv,
-    env_ids: Sequence[int],
-    entry_local_x_m: float = _INTERLACED_APPROACH_ENTRY_LOCAL_X_M,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor | None:
-    """Report the terminal entry rate for resetting approach episodes."""
-    return _interlaced_corridor_approach_progress_rate(
-        env, env_ids, entry_local_x_m, reject_lateral_exit=False, asset_cfg=asset_cfg
-    )
-
-
-def interlaced_corridor_approach_completion_rate(
-    env: ManagerBasedRLEnv,
-    env_ids: Sequence[int],
-    completion_local_x_m: float = _INTERLACED_APPROACH_COMPLETION_LOCAL_X_M,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor | None:
-    """Report the successful terminal completion rate for resetting approach episodes."""
-    return _interlaced_corridor_approach_progress_rate(
-        env, env_ids, completion_local_x_m, reject_lateral_exit=True, asset_cfg=asset_cfg
-    )
-
-
 def terrain_levels_vel_with_termination(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     standard_terrain_curriculum_half_extent_m: float | None = None,
-    approach_entry_local_x_m: float = _INTERLACED_APPROACH_ENTRY_LOCAL_X_M,
-    approach_completion_local_x_m: float = _INTERLACED_APPROACH_COMPLETION_LOCAL_X_M,
     s_curve_terrain_types: tuple[str, ...] | list[str] = (),
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
@@ -668,7 +615,7 @@ def terrain_levels_vel_with_termination(
 
     **interlaced_corridor_wedges_approach**
     - move_up：到达四段走廊末端且未横向越界
-    - move_down：有前进指令却未完成入口阶段、横向越界，或在完成前姿态失败
+    - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
 
     **其它地形**
     - 有前进速度指令：原距离课程
@@ -686,12 +633,6 @@ def terrain_levels_vel_with_termination(
     Returns:
         The mean terrain level for the given environment ids.
     """
-    if approach_completion_local_x_m <= approach_entry_local_x_m:
-        raise ValueError(
-            "approach_completion_local_x_m must exceed approach_entry_local_x_m, "
-            f"got {approach_completion_local_x_m} <= {approach_entry_local_x_m}."
-        )
-
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
     terrain: TerrainImporter = env.scene.terrain
@@ -727,7 +668,7 @@ def terrain_levels_vel_with_termination(
             _update_terrain_state(state, terrain)
 
     # Convert env_ids to tensor for batch processing
-    env_ids_tensor = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+    env_ids_tensor = torch.tensor(env_ids, device=env.device, dtype=torch.long)
 
     # compute the distance the robot walked
     distance = torch.norm(asset.data.root_pos_w[env_ids_tensor, :2] - env.scene.env_origins[env_ids_tensor, :2], dim=1)
@@ -742,7 +683,9 @@ def terrain_levels_vel_with_termination(
     move_down = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
-    is_interlaced_approach = _env_ids_on_terrain_types(env, env_ids_tensor, _INTERLACED_APPROACH_TERRAIN_TYPES)
+    is_interlaced_approach = _env_ids_on_terrain_types(
+        env, env_ids_tensor, ("interlaced_corridor_wedges_approach",)
+    )
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
     other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve)
 
@@ -779,22 +722,19 @@ def terrain_levels_vel_with_termination(
         move_down[f8_local] = fell_off
 
     # 坡前出生不能使用相对 terrain origin 的欧氏距离：初始 x 已接近 -4 m。
-    # 完整通过才升档；入口失败、横向越界或完成前姿态失败则降档。
+    # 仅在走到四段走廊末端时升档；有前进指令却仍停在入口前则降档。
     if is_interlaced_approach.any():
         approach_local = torch.where(is_interlaced_approach)[0]
         approach_env_ids = env_ids_tensor[approach_local]
         local_x = asset.data.root_pos_w[approach_env_ids, 0] - env.scene.env_origins[approach_env_ids, 0]
-        reached_corridor_end = local_x >= float(approach_completion_local_x_m)
-        stayed_before_entry = local_x <= float(approach_entry_local_x_m)
+        reached_corridor_end = local_x >= 2.5
+        stayed_before_entry = local_x <= -3.0
         lateral_exit = env.termination_manager.get_term("approach_corridor_lateral_exit")[
             approach_env_ids
         ]
-        bad_orientation = env.termination_manager.get_term("bad_orientation")[approach_env_ids]
-
         move_up[approach_local] = reached_corridor_end & ~lateral_exit
         move_down[approach_local] = (
             lateral_exit
-            | (bad_orientation & ~reached_corridor_end)
             | (stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end)
         )
 
