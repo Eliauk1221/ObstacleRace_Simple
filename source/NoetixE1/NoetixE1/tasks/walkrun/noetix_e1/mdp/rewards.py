@@ -869,6 +869,172 @@ def corridor_centerline_exp(
     return reward * active.float()
 
 
+def _corridor_smooth_reference_geometry(
+    local_x: torch.Tensor,
+    transition_x_range: tuple[float, float],
+    path_y_range: tuple[float, float],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the smoothstep lateral reference and its forward unit tangent."""
+    x_start, x_end = transition_x_range
+    if x_end <= x_start:
+        raise ValueError(f"transition_x_range must be increasing, got {transition_x_range}.")
+
+    phase = ((local_x - float(x_start)) / float(x_end - x_start)).clamp(0.0, 1.0)
+    y_start, y_end = path_y_range
+    lateral_delta = float(y_end) - float(y_start)
+    smooth_phase = phase * phase * (3.0 - 2.0 * phase)
+    reference_y = float(y_start) + lateral_delta * smooth_phase
+
+    reference_slope = lateral_delta * 6.0 * phase * (1.0 - phase) / float(x_end - x_start)
+    tangent = torch.stack((torch.ones_like(reference_slope), reference_slope), dim=1)
+    tangent = tangent / torch.clamp(torch.norm(tangent, dim=1, keepdim=True), min=1e-6)
+    return reference_y, tangent
+
+
+def _corridor_smooth_lateral_reference(
+    local_x: torch.Tensor,
+    transition_x_range: tuple[float, float],
+    path_y_range: tuple[float, float],
+) -> torch.Tensor:
+    """Return a smoothstep lateral reference from ``path_y_range[0]`` to ``path_y_range[1]``."""
+    reference_y, _ = _corridor_smooth_reference_geometry(local_x, transition_x_range, path_y_range)
+    return reference_y
+
+
+def corridor_smooth_path_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    transition_x_range: tuple[float, float],
+    path_y_range: tuple[float, float],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward tracking a lateral reference that moves smoothly with corridor-local x."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    reference_y = _corridor_smooth_lateral_reference(
+        local_xy[:, 0], transition_x_range, path_y_range
+    )
+    path_error = local_xy[:, 1] - reference_y
+    reward = torch.exp(-torch.square(path_error) / (std**2))
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        if x_hi <= x_lo:
+            raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    return reward * active.float()
+
+
+def corridor_smooth_path_tangent_speed_gated_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    transition_x_range: tuple[float, float],
+    path_y_range: tuple[float, float],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward smooth-path tracking in proportion to forward speed along the path tangent."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    reference_y, tangent = _corridor_smooth_reference_geometry(
+        local_xy[:, 0], transition_x_range, path_y_range
+    )
+    path_error = local_xy[:, 1] - reference_y
+    path_reward = torch.exp(-torch.square(path_error) / (std**2))
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    tangent_speed = torch.sum(asset.data.root_lin_vel_w[:, :2] * tangent, dim=1)
+    speed_factor = torch.clamp(tangent_speed / torch.clamp(cmd_x, min=1e-6), min=0.0, max=1.0)
+
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        if x_hi <= x_lo:
+            raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    return path_reward * speed_factor * active.float()
+
+
+def corridor_world_x_smooth_path_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    transition_x_range: tuple[float, float],
+    path_y_range: tuple[float, float],
+    path_half_width_m: float | tuple[float, float],
+    max_forward_speed: float,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward positive world-x progress inside a fixed or front-wide path band."""
+    if isinstance(path_half_width_m, tuple):
+        if len(path_half_width_m) != 2:
+            raise ValueError(
+                f"path_half_width_m tuple must contain (early_width, late_width), got {path_half_width_m}."
+            )
+        early_half_width, late_half_width = map(float, path_half_width_m)
+        if early_half_width <= 0.0 or late_half_width <= 0.0:
+            raise ValueError(f"path_half_width_m values must be positive, got {path_half_width_m}.")
+        if late_half_width > early_half_width:
+            raise ValueError(
+                f"path_half_width_m must narrow from early to late, got {path_half_width_m}."
+            )
+    else:
+        early_half_width = late_half_width = float(path_half_width_m)
+        if early_half_width <= 0.0:
+            raise ValueError(f"path_half_width_m must be positive, got {path_half_width_m}.")
+    if max_forward_speed <= 0.0:
+        raise ValueError(f"max_forward_speed must be positive, got {max_forward_speed}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    reference_y = _corridor_smooth_lateral_reference(
+        local_xy[:, 0], transition_x_range, path_y_range
+    )
+    path_error = local_xy[:, 1] - reference_y
+    if early_half_width == late_half_width:
+        path_half_width = early_half_width
+    else:
+        x_start, x_end = transition_x_range
+        phase = ((local_xy[:, 0] - float(x_start)) / float(x_end - x_start)).clamp(0.0, 1.0)
+        taper_phase = ((phase - 0.5) / 0.5).clamp(0.0, 1.0)
+        smooth_taper = taper_phase * taper_phase * (3.0 - 2.0 * taper_phase)
+        path_half_width = early_half_width + (late_half_width - early_half_width) * smooth_taper
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+
+    active = (
+        _terrain_type_mask(env, terrain_types, asset.device)
+        & (cmd_x > min_forward_command)
+        & (torch.abs(path_error) <= path_half_width)
+    )
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        if x_hi <= x_lo:
+            raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    forward_speed = asset.data.root_lin_vel_w[:, 0].clamp(min=0.0, max=float(max_forward_speed))
+    return forward_speed * active.float()
+
+
 def corridor_world_x_progress_reward(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...],

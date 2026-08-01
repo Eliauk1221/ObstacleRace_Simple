@@ -613,8 +613,8 @@ def terrain_levels_vel_with_termination(
     - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
 
-    **interlaced_corridor_wedges_approach**
-    - move_up：到达四段走廊末端且未横向越界
+    **interlaced corridor approach / smooth-exit variants**
+    - move_up：到达对应完成线且未横向越界
     - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
 
     **其它地形**
@@ -684,7 +684,19 @@ def terrain_levels_vel_with_termination(
 
     is_figure8 = _env_ids_on_terrain_types(env, env_ids_tensor, ("figure8_bridge",))
     is_interlaced_approach = _env_ids_on_terrain_types(
-        env, env_ids_tensor, ("interlaced_corridor_wedges_approach",)
+        env,
+        env_ids_tensor,
+        (
+            "interlaced_corridor_wedges_approach",
+            "interlaced_corridor_wedges_smooth_exit",
+        ),
+    )
+    is_interlaced_full_exit = _env_ids_on_terrain_types(
+        env,
+        env_ids_tensor,
+        (
+            "interlaced_corridor_wedges_smooth_exit",
+        ),
     )
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
     other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve)
@@ -727,11 +739,18 @@ def terrain_levels_vel_with_termination(
         approach_local = torch.where(is_interlaced_approach)[0]
         approach_env_ids = env_ids_tensor[approach_local]
         local_x = asset.data.root_pos_w[approach_env_ids, 0] - env.scene.env_origins[approach_env_ids, 0]
-        reached_corridor_end = local_x >= 2.5
+        smooth_exit_mask = is_interlaced_full_exit[approach_local]
+        completion_x = torch.where(
+            smooth_exit_mask,
+            torch.full_like(local_x, 3.1),
+            torch.full_like(local_x, 2.5),
+        )
+        reached_corridor_end = local_x >= completion_x
         stayed_before_entry = local_x <= -3.0
-        lateral_exit = env.termination_manager.get_term("approach_corridor_lateral_exit")[
-            approach_env_ids
-        ]
+        lateral_exit = (
+            env.termination_manager.get_term("approach_corridor_lateral_exit")[approach_env_ids]
+            | env.termination_manager.get_term("smooth_exit_corridor_lateral_exit")[approach_env_ids]
+        )
         move_up[approach_local] = reached_corridor_end & ~lateral_exit
         move_down[approach_local] = (
             lateral_exit

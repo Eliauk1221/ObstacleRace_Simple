@@ -600,7 +600,7 @@ _DEPTH6_FLAT_PATCH_TARGET = {
     ),
 }
 
-# DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges + figure8_bridge
+# DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges_smooth_exit
 DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     curriculum=True,
     size=(12.0, 12.0),
@@ -669,20 +669,32 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             platform_width=2.0,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        "interlaced_corridor_wedges": HfInterlacedCorridorWedgesTerrainCfg(
-            proportion=0.1,
-            corridor_half_width_m=1.5,
-            segment_length_m=1.5,
-            num_segments=4,
-            slope_angle_range=(15.0, 15.0),
-            edge_blend_m=0.02,
-            corridor_edge_fade_m=0.06,
-            pattern_origin_x_m=-3.0,
-            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
-        ),
+        # "interlaced_corridor_wedges": HfInterlacedCorridorWedgesTerrainCfg(
+        #     proportion=0.1,
+        #     corridor_half_width_m=1.5,
+        #     segment_length_m=1.5,
+        #     num_segments=4,
+        #     slope_angle_range=(15.0, 15.0),
+        #     edge_blend_m=0.02,
+        #     corridor_edge_fade_m=0.06,
+        #     pattern_origin_x_m=-3.0,
+        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        # ),
         # 与现有交错斜坡使用同一几何；仅 reset 出生区独立，专门训练坡前低侧进入。
-        "interlaced_corridor_wedges_approach": HfInterlacedCorridorWedgesTerrainCfg(
-            proportion=0.1,
+        # "interlaced_corridor_wedges_approach": HfInterlacedCorridorWedgesTerrainCfg(
+        #     proportion=0.3,
+        #     corridor_half_width_m=1.5,
+        #     segment_length_m=1.5,
+        #     num_segments=4,
+        #     slope_angle_range=(15.0, 15.0),
+        #     edge_blend_m=0.02,
+        #     corridor_edge_fade_m=0.06,
+        #     pattern_origin_x_m=-3.0,
+        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        # ),
+        # 复用坡前低侧出生和相同几何，仅在独立奖励项中训练末段平滑移向低侧出口。
+        "interlaced_corridor_wedges_smooth_exit": HfInterlacedCorridorWedgesTerrainCfg(
+            proportion=0.3,
             corridor_half_width_m=1.5,
             segment_length_m=1.5,
             num_segments=4,
