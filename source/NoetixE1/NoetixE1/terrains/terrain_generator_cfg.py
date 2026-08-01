@@ -600,7 +600,7 @@ _DEPTH6_FLAT_PATCH_TARGET = {
     ),
 }
 
-# DEPTH_TERRAINS_CFG6：walkrun 主用；含 interlaced_corridor_wedges_smooth_exit
+# DEPTH_TERRAINS_CFG6：walkrun 主用；含交叉斜坡的 approach 与 smooth entry/exit 变体
 DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     curriculum=True,
     size=(12.0, 12.0),
@@ -705,7 +705,19 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         # ),
         # 复用坡前低侧出生和相同几何，仅在独立奖励项中训练末段平滑移向低侧出口。
-        "interlaced_corridor_wedges_smooth_exit": HfInterlacedCorridorWedgesTerrainCfg(
+        # "interlaced_corridor_wedges_smooth_exit": HfInterlacedCorridorWedgesTerrainCfg(
+        #     proportion=0.3,
+        #     corridor_half_width_m=1.5,
+        #     segment_length_m=1.5,
+        #     num_segments=4,
+        #     slope_angle_range=(15.0, 15.0),
+        #     edge_blend_m=0.02,
+        #     corridor_edge_fade_m=0.06,
+        #     pattern_origin_x_m=-3.0,
+        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        # ),
+        # 独立训练低侧平滑入口、内部中心线和低侧平滑出口。
+        "interlaced_corridor_wedges_smooth_entry_exit": HfInterlacedCorridorWedgesTerrainCfg(
             proportion=0.3,
             corridor_half_width_m=1.5,
             segment_length_m=1.5,

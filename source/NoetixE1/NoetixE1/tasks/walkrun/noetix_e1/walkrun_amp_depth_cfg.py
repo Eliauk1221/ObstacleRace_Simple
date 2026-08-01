@@ -276,6 +276,12 @@ class CommandsCfg:
                 ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.5, 0.9, 0.5],
             ),
+            "interlaced_corridor_wedges_smooth_entry_exit": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.3, 1.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.5, 0.9, 0.5],
+            ),
             "s_curve": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
                 lin_vel_x=(0.8, 2.0),
                 lin_vel_y=(0.0, 0.0),
@@ -608,6 +614,7 @@ class EventCfg:
                 "interlaced_corridor_wedges": (-0.5235987755982988, 0.5235987755982988),  # +/- 30 deg
                 "interlaced_corridor_wedges_approach": (-0.2617993877991494, 0.2617993877991494),  # +/- 15 deg
                 "interlaced_corridor_wedges_smooth_exit": (-0.2617993877991494, 0.2617993877991494),
+                "interlaced_corridor_wedges_smooth_entry_exit": (-0.2617993877991494, 0.2617993877991494),
                 "s_curve": (2.9, 3.4),
                 "s_curve_reverse": (-0.2, 0.2),
             },
@@ -640,6 +647,10 @@ class EventCfg:
                     "x": (-4.0, -3.2),
                     "y": (-0.75, -0.25),
                 },
+                "interlaced_corridor_wedges_smooth_entry_exit": {
+                    "x": (-4.0, -3.2),
+                    "y": (-0.9, -0.4),
+                },
                 "s_curve": {
                     "x": (0.9, 1.2),
                     "y": (-3.1, -3.3),
@@ -653,6 +664,7 @@ class EventCfg:
                 "interlaced_corridor_wedges": -0.2,
                 "interlaced_corridor_wedges_approach": -0.6,
                 "interlaced_corridor_wedges_smooth_exit": -0.6,
+                "interlaced_corridor_wedges_smooth_entry_exit": -0.6,
             },
             "terrain_specific_rsi_motion_files": {
                 "s_curve": [
@@ -800,6 +812,14 @@ class EventCfg:
                     "pitch": (-0.5, 0.5),
                     "yaw": (-0.5, 0.5),
                 },
+                "interlaced_corridor_wedges_smooth_entry_exit": {
+                    "x": (-0.8, 0.8),
+                    "y": (-0.8, 0.8),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
+                    "yaw": (-0.5, 0.5),
+                },
             },
         },
     )
@@ -823,6 +843,7 @@ class RewardsCfg:
             "skip_terrain_types": (
                 "figure8_bridge", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
+                "interlaced_corridor_wedges_smooth_entry_exit",
             ),
             "zero_terrain_types": ("s_curve", "s_curve_reverse"),
         },
@@ -839,6 +860,7 @@ class RewardsCfg:
             "terrain_types": (
                 "figure8_bridge", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
+                "interlaced_corridor_wedges_smooth_entry_exit",
                 "s_curve", "s_curve_reverse",
             ),
             "scale_on_terrain": 0.0,
@@ -1248,6 +1270,144 @@ class RewardsCfg:
         params={"term_name": "smooth_exit_corridor_lateral_exit"},
     )
 
+    # --------------------------- interlaced_corridor_wedges_smooth_entry_exit ---------------------------
+
+    smooth_entry_exit_corridor_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=2.0,
+        params={
+            "std": 0.2,
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-2.8, 1.5),
+        },
+    )
+    smooth_entry_exit_corridor_world_x_progress_guidance = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "safe_half_width_m": 0.95,
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.2, -2.8),
+        },
+    )
+    smooth_entry_exit_corridor_world_x_progress_guidance_mid = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "safe_half_width_m": 0.7,
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-2.8, -2.0),
+        },
+    )
+    smooth_entry_exit_corridor_world_x_progress = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "safe_half_width_m": 0.5,
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-2.0, 1.5),
+        },
+    )
+    smooth_entry_exit_corridor_exit_feedback_direction_progress = RewTerm(
+        func=mdp.corridor_feedback_direction_progress_reward,
+        weight=5.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "target_y": 1.0,
+            "lateral_gain": 1.8,
+            "max_lateral_slope": 1.0,
+            "max_alignment_error": 0.3490658503988659,  # 20 deg
+            "max_forward_speed": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (1.5, 3.2),
+        },
+    )
+    smooth_entry_exit_corridor_exit_funnel_shortfall = RewTerm(
+        func=mdp.corridor_smooth_funnel_shortfall_penalty,
+        weight=-2.0,
+        params={
+            "std": 0.3,
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "transition_x_range": (1.5, 2.8),
+            "minimum_y_range": (0.0, 0.75),
+            "min_forward_command": 0.3,
+            "local_x_range": (1.5, 3.2),
+        },
+    )
+    smooth_entry_exit_corridor_heading_threshold = RewTerm(
+        func=mdp.corridor_heading_threshold_penalty,
+        weight=-2.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "penalty_threshold": 0.5235987755982988,
+            "penalty_limit": 1.0471975511965976,
+            "target_heading": 0.0,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.2, -2.8),
+        },
+    )
+    smooth_entry_exit_interlaced_ramp_step_up_lift = RewTerm(
+        func=mdp.interlaced_corridor_ramp_step_up_lift_reward,
+        weight=3.0,
+        params={
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
+            "offset": 0.06,
+            "clearance_threshold": 0.15,
+            "std": 0.05,
+            "x_range": (-3.4, -2.8),
+            "min_forward_command": 0.3,
+            "min_episode_length": 10,
+            "max_abs_local_y": 1.2,
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+        },
+    )
+    smooth_entry_exit_corridor_entry_lateral_threshold = RewTerm(
+        func=mdp.corridor_lateral_threshold_penalty,
+        weight=-3.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "penalty_threshold": 0.95,
+            "penalty_limit": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.2, -2.0),
+        },
+    )
+    smooth_entry_exit_corridor_center_lateral_threshold = RewTerm(
+        func=mdp.corridor_lateral_threshold_penalty,
+        weight=-3.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "penalty_threshold": 0.7,
+            "penalty_limit": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-2.0, 1.5),
+        },
+    )
+    smooth_entry_exit_corridor_final_lateral_threshold = RewTerm(
+        func=mdp.corridor_lateral_threshold_penalty,
+        weight=-3.0,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+            "penalty_threshold": 1.3,
+            "penalty_limit": 1.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (1.5, 3.0),
+        },
+    )
+    smooth_entry_exit_corridor_lateral_exit_penalty = RewTerm(
+        func=mdp.termination_term_indicator,
+        weight=-50.0,
+        params={"term_name": "smooth_entry_exit_corridor_lateral_exit"},
+    )
     # ------------------------------------------------- Base --------------------------------------------------
     flat_orientation_exp = RewTerm(func=mdp.flat_orientation_exp, weight=0.5, params={"std": 0.5})
     # ------------------------------------------------- Feet --------------------------------------------------
@@ -1293,6 +1453,7 @@ class RewardsCfg:
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
+                "interlaced_corridor_wedges_smooth_entry_exit",
             ),
         },
     )
@@ -1308,6 +1469,7 @@ class RewardsCfg:
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
+                "interlaced_corridor_wedges_smooth_entry_exit",
                 "s_curve", "s_curve_reverse",
             ),
         },
@@ -1551,6 +1713,14 @@ class TerminationsCfg:
         func=mdp.interlaced_corridor_lateral_exit,
         params={
             "terrain_types": ("interlaced_corridor_wedges_smooth_exit",),
+            "local_x_range": (-4.2, 3.0),
+            "max_abs_local_y": 1.55,
+        },
+    )
+    smooth_entry_exit_corridor_lateral_exit = DoneTerm(
+        func=mdp.interlaced_corridor_lateral_exit,
+        params={
+            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
             "local_x_range": (-4.2, 3.0),
             "max_abs_local_y": 1.55,
         },

@@ -613,7 +613,7 @@ def terrain_levels_vel_with_termination(
     - move_down：仅 ``figure8_bridge_fall_off``（脚 XY 离开 8 字桥面环带）
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
 
-    **interlaced corridor approach / smooth-exit variants**
+    **interlaced corridor approach / smooth-exit / smooth-entry-exit variants**
     - move_up：到达对应完成线且未横向越界
     - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
 
@@ -689,6 +689,7 @@ def terrain_levels_vel_with_termination(
         (
             "interlaced_corridor_wedges_approach",
             "interlaced_corridor_wedges_smooth_exit",
+            "interlaced_corridor_wedges_smooth_entry_exit",
         ),
     )
     is_interlaced_full_exit = _env_ids_on_terrain_types(
@@ -696,6 +697,7 @@ def terrain_levels_vel_with_termination(
         env_ids_tensor,
         (
             "interlaced_corridor_wedges_smooth_exit",
+            "interlaced_corridor_wedges_smooth_entry_exit",
         ),
     )
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
@@ -750,6 +752,7 @@ def terrain_levels_vel_with_termination(
         lateral_exit = (
             env.termination_manager.get_term("approach_corridor_lateral_exit")[approach_env_ids]
             | env.termination_manager.get_term("smooth_exit_corridor_lateral_exit")[approach_env_ids]
+            | env.termination_manager.get_term("smooth_entry_exit_corridor_lateral_exit")[approach_env_ids]
         )
         move_up[approach_local] = reached_corridor_end & ~lateral_exit
         move_down[approach_local] = (

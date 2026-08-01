@@ -1035,6 +1035,100 @@ def corridor_world_x_smooth_path_progress_reward(
     return forward_speed * active.float()
 
 
+def corridor_smooth_funnel_shortfall_penalty(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    transition_x_range: tuple[float, float],
+    minimum_y_range: tuple[float, float],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize positions below a smooth, one-sided corridor exit boundary."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    minimum_y = _corridor_smooth_lateral_reference(
+        local_xy[:, 0], transition_x_range, minimum_y_range
+    )
+    shortfall = torch.clamp(minimum_y - local_xy[:, 1], min=0.0)
+    penalty = 1.0 - torch.exp(-torch.square(shortfall) / (std**2))
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        if x_hi <= x_lo:
+            raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    return penalty * active.float()
+
+
+def corridor_feedback_direction_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    target_y: float,
+    lateral_gain: float,
+    max_lateral_slope: float,
+    max_alignment_error: float,
+    max_forward_speed: float,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward progress along a lateral-error feedback direction with an alignment gate."""
+    if lateral_gain <= 0.0:
+        raise ValueError(f"lateral_gain must be positive, got {lateral_gain}.")
+    if max_lateral_slope <= 0.0:
+        raise ValueError(f"max_lateral_slope must be positive, got {max_lateral_slope}.")
+    if not 0.0 < max_alignment_error < math.pi:
+        raise ValueError(
+            f"max_alignment_error must be in (0, pi), got {max_alignment_error}."
+        )
+    if max_forward_speed <= 0.0:
+        raise ValueError(f"max_forward_speed must be positive, got {max_forward_speed}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    lateral_slope = torch.clamp(
+        float(lateral_gain) * (float(target_y) - local_xy[:, 1]),
+        min=-float(max_lateral_slope),
+        max=float(max_lateral_slope),
+    )
+    desired_direction = torch.stack((torch.ones_like(lateral_slope), lateral_slope), dim=1)
+    desired_direction = desired_direction / torch.clamp(
+        torch.norm(desired_direction, dim=1, keepdim=True), min=1e-6
+    )
+
+    planar_velocity = asset.data.root_lin_vel_w[:, :2]
+    planar_speed = torch.norm(planar_velocity, dim=1)
+    directional_speed = torch.sum(planar_velocity * desired_direction, dim=1)
+    alignment_cos = directional_speed / torch.clamp(planar_speed, min=1e-6)
+    minimum_alignment_cos = math.cos(float(max_alignment_error))
+    alignment_factor = torch.clamp(
+        (alignment_cos - minimum_alignment_cos) / (1.0 - minimum_alignment_cos),
+        min=0.0,
+        max=1.0,
+    )
+    reward = torch.clamp(directional_speed, min=0.0, max=float(max_forward_speed)) * alignment_factor
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        if x_hi <= x_lo:
+            raise ValueError(f"local_x_range must be increasing, got {local_x_range}.")
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+
+    return reward * active.float()
+
+
 def corridor_world_x_progress_reward(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...],
