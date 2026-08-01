@@ -31,6 +31,31 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
         )
         # Cache for terrain type (col_indices) computed in step function
         self._current_terrain_col_indices: torch.Tensor | None = None
+        self._foothold_body_ids = torch.tensor(
+            self.robot.find_bodies(
+                ["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"], preserve_order=True
+            )[0],
+            device=self.device,
+            dtype=torch.long,
+        )
+        contact_sensor = self.scene.sensors["contact_sensor"]
+        contact_body_names = list(contact_sensor.body_names)
+        self._foothold_contact_body_ids = torch.tensor(
+            [
+                contact_body_names.index("l_leg_ankle_roll_link"),
+                contact_body_names.index("r_leg_ankle_roll_link"),
+            ],
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._imagined_foothold_mu = torch.zeros(self.num_envs, 2, 2, device=self.device)
+        self._imagined_foothold_sigma = torch.full((self.num_envs, 2), 0.15, device=self.device)
+        self._foothold_prediction_valid = False
+        self._foothold_decision_base_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._foothold_decision_base_quat_w = torch.zeros(self.num_envs, 4, device=self.device)
+        self._foothold_decision_contact = torch.ones(
+            self.num_envs, 2, device=self.device, dtype=torch.bool
+        )
         # ---------------------- Initial Motion Loader ----------------------
         self.motion_loader_class: MotionLoaderE1 = eval(self.cfg.motion_loader_name)
         self.motion_loader: MotionLoaderE1 = self.motion_loader_class(
@@ -109,6 +134,31 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
     """
     Helper methods.
     """
+
+    def set_imagined_footholds(self, mu: torch.Tensor, sigma: torch.Tensor) -> None:
+        """Cache policy-side imagined contacts for this decision step."""
+        if mu.shape != self._imagined_foothold_mu.shape or sigma.shape != self._imagined_foothold_sigma.shape:
+            raise ValueError(
+                f"Expected foothold mu/sigma shapes {self._imagined_foothold_mu.shape}/"
+                f"{self._imagined_foothold_sigma.shape}, got {mu.shape}/{sigma.shape}."
+            )
+        self._imagined_foothold_mu.copy_(mu.detach().to(self.device))
+        self._imagined_foothold_sigma.copy_(sigma.detach().to(self.device))
+        self._foothold_prediction_valid = True
+
+    def _foothold_contact_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        contact_sensor = self.scene.sensors["contact_sensor"]
+        forces_history = contact_sensor.data.net_forces_w_history[
+            :, :, self._foothold_contact_body_ids, :
+        ]
+        contact = torch.amax(torch.linalg.vector_norm(forces_history, dim=-1), dim=1) > 0.5
+        current_forces = contact_sensor.data.net_forces_w[:, self._foothold_contact_body_ids, :]
+        return contact, current_forces
+
+    @staticmethod
+    def _yaw_from_quat(quat_w: torch.Tensor) -> torch.Tensor:
+        w, x, y, z = quat_w.unbind(dim=-1)
+        return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
     def _compute_terrain_statistics(self):
         """Compute terrain statistics and add them to extras["log"].
@@ -382,6 +432,16 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
         Returns:
             A tuple containing the observations, rewards, resets (terminated and truncated) and extras.
         """
+        # Cache the exact decision frame used by the imagined-contact model.
+        self._foothold_decision_base_pos_w.copy_(self.robot.data.root_pos_w)
+        self._foothold_decision_base_quat_w.copy_(self.robot.data.root_quat_w)
+        decision_contact, _ = self._foothold_contact_state()
+        self._foothold_decision_contact.copy_(decision_contact)
+        contact_sensor = self.scene.sensors["contact_sensor"]
+        decision_air_time = contact_sensor.data.current_air_time[
+            :, self._foothold_contact_body_ids
+        ].clone()
+
         # process actions
         self.action_manager.process_action(action.to(self.device))
 
@@ -411,9 +471,41 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
 
         # -- compute terrain type (col_indices) for all robots based on current positions (batch processing)
         # This is computed once per step and cached for use by reward/termination/command functions
-        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _get_terrain_type_from_position
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import (
+            _check_terrain_types_from_positions,
+            _get_terrain_type_from_position,
+        )
         robot_positions_w = self.robot.data.root_pos_w  # (num_envs, 3)
         self._current_terrain_col_indices = _get_terrain_type_from_position(self, robot_positions_w)
+
+        # Detect first valid contact before terminated environments are reset.
+        post_contact, post_forces = self._foothold_contact_state()
+        touchdown = post_contact & ~decision_contact
+        stumble = torch.linalg.vector_norm(post_forces[..., :2], dim=-1) > (
+            4.0 * torch.abs(post_forces[..., 2])
+        )
+        touchdown_valid = touchdown & (decision_air_time >= 0.04) & ~stumble
+        touchdown_xy_w = self.robot.data.body_pos_w[:, self._foothold_body_ids, :2].clone()
+        stair_direction = torch.full(
+            (self.num_envs,), -1, device=self.device, dtype=torch.int8
+        )
+        up_mask = _check_terrain_types_from_positions(
+            self, None, ("stairs_up",), col_indices=self._current_terrain_col_indices
+        )
+        down_mask = _check_terrain_types_from_positions(
+            self, None, ("stairs_down",), col_indices=self._current_terrain_col_indices
+        )
+        stair_direction[up_mask] = 0
+        stair_direction[down_mask] = 1
+        self.extras["foothold_events"] = {
+            "decision_swing": ~decision_contact,
+            "decision_base_xy": self._foothold_decision_base_pos_w[:, :2].clone(),
+            "decision_base_yaw": self._yaw_from_quat(self._foothold_decision_base_quat_w).clone(),
+            "touchdown": touchdown,
+            "touchdown_valid": touchdown_valid,
+            "touchdown_xy_w": touchdown_xy_w,
+            "stair_direction": stair_direction,
+        }
 
         # post-step:
         # -- update env counters (used for curriculum generation)

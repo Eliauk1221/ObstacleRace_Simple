@@ -33,6 +33,15 @@ class RslRlAmpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     discriminator_loss_function = "WassersteinLoss"  # BCEWithLogitsLoss, MSELoss, WassersteinLoss
     amp_replay_buffer_size = 200000
     normalize_advantage_per_mini_batch = False
+    foothold_imagination_enabled = True
+    foothold_learning_rate = 1.0e-3
+    foothold_hidden_dims = (512, 256, 128)
+    foothold_min_sigma = 0.02
+    foothold_max_sigma = 0.50
+    foothold_replay_buffer_size = 50000
+    foothold_pending_steps = 16
+    foothold_batch_size = 2048
+    foothold_updates_per_iteration = 4
     symmetry_cfg = RslRlSymmetryCfg(
         use_data_augmentation=True,
         use_mirror_loss=False,

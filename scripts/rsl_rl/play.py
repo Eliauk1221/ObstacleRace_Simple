@@ -41,6 +41,18 @@ parser.add_argument("--visualize_moe", action="store_true", default=False, help=
 parser.add_argument("--moe_visual_interval", type=int, default=10, help="Print/refresh MoE weights every N steps.")
 parser.add_argument("--moe_env_idx", type=int, default=0, help="Environment index used for MoE weight visualization.")
 parser.add_argument(
+    "--visualize_footholds",
+    action="store_true",
+    default=False,
+    help="Visualize the learned per-foot foothold means and uncertainty.",
+)
+parser.add_argument(
+    "--foothold_env_idx",
+    type=int,
+    default=0,
+    help="Environment index used for imagined foothold visualization.",
+)
+parser.add_argument(
     "--showcase_terrain",
     type=str,
     default="",
@@ -93,9 +105,12 @@ import os
 import time
 
 import gymnasium as gym
+import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 import isaaclab_tasks  # noqa: F401
 import NoetixE1.tasks  # noqa: F401
 import NoetixE1.terrains as terrain_gen  # 用于指定地形类型（取消注释下方代码时使用）
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.terrains import FlatPatchSamplingCfg
 import torch
 
@@ -579,6 +594,57 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             args_cli.moe_env_idx = 0
         if plt is None:
             print("[WARN] matplotlib unavailable. MoE weights will be printed to terminal only.")
+
+    foothold_visualizer = None
+    foothold_model = getattr(runner.alg, "foothold_imagination", None)
+    if args_cli.visualize_footholds:
+        if foothold_model is None:
+            print("[WARN] Current agent has no foothold imagination model. Foothold visualization disabled.")
+            args_cli.visualize_footholds = False
+        elif not getattr(runner, "foothold_checkpoint_loaded", False):
+            print("[WARN] Checkpoint has no trained foothold imagination weights. Visualization disabled.")
+            args_cli.visualize_footholds = False
+        else:
+            if args_cli.foothold_env_idx < 0 or args_cli.foothold_env_idx >= env.num_envs:
+                print(f"[WARN] foothold_env_idx={args_cli.foothold_env_idx} out of range, falling back to 0.")
+                args_cli.foothold_env_idx = 0
+            foothold_visualizer = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/ImaginedFootholds",
+                    markers={
+                        "left_mean": sim_utils.SphereCfg(
+                            radius=0.04,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.1, 0.9, 0.2), opacity=1.0
+                            ),
+                        ),
+                        "right_mean": sim_utils.SphereCfg(
+                            radius=0.04,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.35, 0.05), opacity=1.0
+                            ),
+                        ),
+                        "left_sigma": sim_utils.CylinderCfg(
+                            radius=1.0,
+                            height=1.0,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.1, 0.9, 0.2), opacity=0.18
+                            ),
+                        ),
+                        "right_sigma": sim_utils.CylinderCfg(
+                            radius=1.0,
+                            height=1.0,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.35, 0.05), opacity=0.18
+                            ),
+                        ),
+                    },
+                )
+            )
+            print(
+                f"[INFO] Imagined footholds enabled for environment {args_cli.foothold_env_idx}: "
+                "left=green, right=orange, transparent disks=1-sigma."
+            )
     
     # 检查raycaster_camera是否存在（用于3D可视化）
     raycaster_camera = None
@@ -879,8 +945,59 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[WARN] Failed to extract CMoE gate scores: {exc}")
             return None
 
+    def visualize_imagined_footholds(obs_dict, actions):
+        """Predict footholds, inject them into the environment, and draw env-local markers."""
+        if not args_cli.visualize_footholds or foothold_visualizer is None:
+            return
+        critic_obs = policy_nn.get_critic_obs(obs_dict)
+        foothold_mu, foothold_sigma = foothold_model(critic_obs, actions)
+        env.unwrapped.set_imagined_footholds(foothold_mu, foothold_sigma)
+
+        env_idx = args_cli.foothold_env_idx
+        base_pos_w = env.unwrapped.robot.data.root_pos_w[env_idx]
+        base_quat_yaw = math_utils.yaw_quat(
+            env.unwrapped.robot.data.root_quat_w[env_idx : env_idx + 1]
+        ).expand(2, -1)
+        foothold_b = torch.nn.functional.pad(foothold_mu[env_idx], (0, 1))
+        foothold_w = math_utils.quat_apply(base_quat_yaw, foothold_b)
+        foothold_w[:, :2] += base_pos_w[:2]
+
+        scanner = env.unwrapped.scene.sensors["left_foot_height_scanner"]
+        mesh = scanner.meshes[scanner.cfg.mesh_prim_paths[0]]
+        ray_starts = foothold_w.clone()
+        ray_starts[:, 2] = base_pos_w[2] + 2.0
+        ray_directions = torch.zeros_like(ray_starts)
+        ray_directions[:, 2] = -1.0
+        from NoetixE1.utils.warp.ops import raycast_mesh
+
+        ray_hits, _, _, _ = raycast_mesh(ray_starts, ray_directions, mesh, max_dist=4.0)
+        valid = torch.isfinite(ray_hits[:, 2])
+        if not valid.any():
+            foothold_visualizer.set_visibility(False)
+            return
+
+        mean_positions = ray_hits[valid].clone()
+        mean_positions[:, 2] += 0.04
+        disk_positions = ray_hits[valid].clone()
+        disk_positions[:, 2] += 0.008
+        translations = torch.cat((mean_positions, disk_positions), dim=0)
+        valid_foot_ids = torch.arange(2, device=env.device)[valid]
+        marker_indices = torch.cat((valid_foot_ids, valid_foot_ids + 2), dim=0)
+        sigma = foothold_sigma[env_idx, valid].clamp_min(0.02)
+        sphere_scales = torch.ones(valid_foot_ids.numel(), 3, device=env.device)
+        disk_scales = torch.stack((sigma, sigma, torch.full_like(sigma, 0.01)), dim=-1)
+        scales = torch.cat((sphere_scales, disk_scales), dim=0)
+        foothold_visualizer.set_visibility(True)
+        foothold_visualizer.visualize(
+            translations=translations,
+            scales=scales,
+            marker_indices=marker_indices,
+        )
+
     # simulate environment
-    use_onnx_inference = INTERFACE_ONNX and not args_cli.visualize_moe
+    use_onnx_inference = (
+        INTERFACE_ONNX and not args_cli.visualize_moe and not args_cli.visualize_footholds
+    )
     session = None
     if use_onnx_inference:
         load_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
@@ -894,6 +1011,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return torch.from_numpy(result[0]).to(env.device)
     elif args_cli.visualize_moe and INTERFACE_ONNX:
         print("[INFO] MoE visualization requires PyTorch inference. ONNX inference disabled for this run.")
+    elif args_cli.visualize_footholds and INTERFACE_ONNX:
+        print("[INFO] Foothold visualization requires PyTorch inference. ONNX inference disabled for this run.")
 
     while simulation_app.is_running():
         start_time = time.time()
@@ -912,6 +1031,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = onnx_policy(obs["policy"], obs["depth"].view(1, -1))
             else:
                 actions = policy(obs)
+                visualize_imagined_footholds(obs, actions)
                 if args_cli.visualize_moe and timestep % args_cli.moe_visual_interval == 0:
                     gate_scores = get_cmoe_gate_scores(policy_nn, obs)
                     moe_bars = visualize_moe_online(

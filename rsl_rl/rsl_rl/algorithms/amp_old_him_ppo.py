@@ -15,9 +15,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rsl_rl.modules import Discriminator, OldHimDepthActorCritic, OldHimDoubleDepthActorCritic, OldHimDoubleDepthMoEActorCritic
+from rsl_rl.modules import (
+    Discriminator,
+    FootholdImagination,
+    OldHimDepthActorCritic,
+    OldHimDoubleDepthActorCritic,
+    OldHimDoubleDepthMoEActorCritic,
+)
+from rsl_rl.modules.foothold_imagination import world_xy_to_base_yaw
 from rsl_rl.modules.rnd import RandomNetworkDistillation
-from rsl_rl.storage import OldHimRolloutStorage, ReplayBuffer
+from rsl_rl.storage import FootholdReplayBuffer, OldHimRolloutStorage, ReplayBuffer
 from rsl_rl.utils import string_to_callable
 
 
@@ -54,6 +61,15 @@ class AMPOldHIMPPO:
         amp_replay_buffer_size=100000,
         discriminator_loss_function="MSELoss",
         normalize_advantage_per_mini_batch=False,
+        foothold_imagination_enabled=False,
+        foothold_learning_rate=1e-3,
+        foothold_hidden_dims=(512, 256, 128),
+        foothold_min_sigma=0.02,
+        foothold_max_sigma=0.50,
+        foothold_replay_buffer_size=50000,
+        foothold_pending_steps=16,
+        foothold_batch_size=2048,
+        foothold_updates_per_iteration=4,
         # RND parameters
         rnd_cfg: dict | None = None,
         # Symmetry parameters
@@ -134,6 +150,20 @@ class AMPOldHIMPPO:
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
 
+        # Training-only privileged model for future foothold distributions.
+        self.foothold_imagination_enabled = foothold_imagination_enabled
+        self.foothold_learning_rate = foothold_learning_rate
+        self.foothold_hidden_dims = tuple(foothold_hidden_dims)
+        self.foothold_min_sigma = foothold_min_sigma
+        self.foothold_max_sigma = foothold_max_sigma
+        self.foothold_replay_buffer_size = foothold_replay_buffer_size
+        self.foothold_pending_steps = foothold_pending_steps
+        self.foothold_batch_size = foothold_batch_size
+        self.foothold_updates_per_iteration = foothold_updates_per_iteration
+        self.foothold_imagination: FootholdImagination | None = None
+        self.foothold_optimizer: optim.Optimizer | None = None
+        self.foothold_replay: FootholdReplayBuffer | None = None
+
         # Discriminator components
         self.discriminator = discriminator
         self.discriminator.to(self.device)
@@ -174,6 +204,114 @@ class AMPOldHIMPPO:
             actions_shape,
             self.device,
         )
+        if self.foothold_imagination_enabled:
+            critic_dim = self.policy.num_critic_obs
+            action_dim = actions_shape[0]
+            self.foothold_imagination = FootholdImagination(
+                critic_dim,
+                action_dim,
+                hidden_dims=self.foothold_hidden_dims,
+                min_sigma=self.foothold_min_sigma,
+                max_sigma=self.foothold_max_sigma,
+            ).to(self.device)
+            self.foothold_optimizer = optim.Adam(
+                self.foothold_imagination.parameters(), lr=self.foothold_learning_rate
+            )
+            self.foothold_replay = FootholdReplayBuffer(
+                critic_dim, action_dim, self.foothold_replay_buffer_size, self.device
+            )
+            pending_shape = (num_envs, 2, self.foothold_pending_steps)
+            self._foothold_pending_obs = torch.empty(
+                *pending_shape, critic_dim, device=self.device, dtype=torch.float16
+            )
+            self._foothold_pending_actions = torch.empty(
+                *pending_shape, action_dim, device=self.device, dtype=torch.float16
+            )
+            self._foothold_pending_base_xy = torch.empty(
+                *pending_shape, 2, device=self.device, dtype=torch.float
+            )
+            self._foothold_pending_yaw = torch.empty(*pending_shape, device=self.device)
+            self._foothold_pending_terrain = torch.empty(
+                *pending_shape, device=self.device, dtype=torch.int8
+            )
+            self._foothold_pending_count = torch.zeros(num_envs, 2, device=self.device, dtype=torch.long)
+            self._foothold_labeled_total = 0
+            self._foothold_discarded_total = 0
+
+    def predict_footholds(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Predict from the state/action cached by the latest call to :meth:`act`."""
+        if self.foothold_imagination is None:
+            return None
+        critic_obs = self.policy.get_critic_obs(self.transition.observations)
+        return self.foothold_imagination(critic_obs, self.transition.actions)
+
+    def _process_foothold_events(self, extras, dones) -> None:
+        if self.foothold_imagination is None or "foothold_events" not in extras:
+            return
+        events = extras["foothold_events"]
+        swing = events["decision_swing"].to(self.device)
+        base_xy = events["decision_base_xy"].to(self.device)
+        base_yaw = events["decision_base_yaw"].to(self.device)
+        stair_direction = events["stair_direction"].to(self.device)
+        critic_obs = self.policy.get_critic_obs(self.transition.observations)
+        actions = self.transition.actions
+
+        # Append current decision samples to each active swing queue.
+        for foot_id in range(2):
+            env_ids = swing[:, foot_id].nonzero(as_tuple=False).squeeze(-1)
+            if env_ids.numel() == 0:
+                continue
+            counts = self._foothold_pending_count[env_ids, foot_id]
+            overflow = counts >= self.foothold_pending_steps
+            if overflow.any():
+                overflow_ids = env_ids[overflow]
+                self._foothold_pending_count[overflow_ids, foot_id] = 0
+                self._foothold_discarded_total += int(overflow_ids.numel())
+                counts = self._foothold_pending_count[env_ids, foot_id]
+            self._foothold_pending_obs[env_ids, foot_id, counts] = critic_obs[env_ids].to(torch.float16)
+            self._foothold_pending_actions[env_ids, foot_id, counts] = actions[env_ids].to(torch.float16)
+            self._foothold_pending_base_xy[env_ids, foot_id, counts] = base_xy[env_ids]
+            self._foothold_pending_yaw[env_ids, foot_id, counts] = base_yaw[env_ids]
+            self._foothold_pending_terrain[env_ids, foot_id, counts] = stair_direction[env_ids]
+            self._foothold_pending_count[env_ids, foot_id] = counts + 1
+
+        touchdown = events["touchdown_valid"].to(self.device)
+        touchdown_xy = events["touchdown_xy_w"].to(self.device)
+        step_ids = torch.arange(self.foothold_pending_steps, device=self.device)
+        for foot_id in range(2):
+            env_ids = touchdown[:, foot_id].nonzero(as_tuple=False).squeeze(-1)
+            if env_ids.numel() == 0:
+                continue
+            counts = self._foothold_pending_count[env_ids, foot_id]
+            valid_steps = step_ids.unsqueeze(0) < counts.unsqueeze(1)
+            if not valid_steps.any():
+                continue
+            obs = self._foothold_pending_obs[env_ids, foot_id][valid_steps]
+            queued_actions = self._foothold_pending_actions[env_ids, foot_id][valid_steps]
+            queued_xy = self._foothold_pending_base_xy[env_ids, foot_id][valid_steps]
+            queued_yaw = self._foothold_pending_yaw[env_ids, foot_id][valid_steps]
+            queued_terrain = self._foothold_pending_terrain[env_ids, foot_id][valid_steps]
+            repeated_targets = touchdown_xy[env_ids, foot_id].unsqueeze(1).expand(
+                -1, self.foothold_pending_steps, -1
+            )[valid_steps]
+            targets_b = world_xy_to_base_yaw(repeated_targets, queued_xy, queued_yaw)
+            foot_ids = torch.full((obs.shape[0],), foot_id, device=self.device, dtype=torch.long)
+            self.foothold_replay.insert(obs, queued_actions, targets_b, foot_ids, queued_terrain)
+            self._foothold_labeled_total += int(obs.shape[0])
+            self._foothold_pending_count[env_ids, foot_id] = 0
+
+        invalid_touchdown = events["touchdown"].to(self.device) & ~touchdown
+        invalid_env_ids, invalid_foot_ids = invalid_touchdown.nonzero(as_tuple=True)
+        if invalid_env_ids.numel() > 0:
+            self._foothold_discarded_total += int(
+                self._foothold_pending_count[invalid_env_ids, invalid_foot_ids].sum().item()
+            )
+            self._foothold_pending_count[invalid_env_ids, invalid_foot_ids] = 0
+
+        done_ids = (dones > 0).nonzero(as_tuple=False).squeeze(-1)
+        if done_ids.numel() > 0:
+            self._foothold_discarded_total += int(self._foothold_pending_count[done_ids].sum().item())
+            self._foothold_pending_count[done_ids] = 0
 
     def act(self, obs):
         if self.policy.is_recurrent:
@@ -214,6 +352,7 @@ class AMPOldHIMPPO:
                 self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device), 1
             )
 
+        self._process_foothold_events(extras, dones)
         # record the transition
         self.storage.add_transitions(self.transition)
         self.amp_policy_data.insert(amp_observation_buf)
@@ -560,6 +699,62 @@ class AMPOldHIMPPO:
         mean_policy_pred /= num_updates
         mean_expert_pred /= num_updates
 
+        # Delayed touchdown supervision is sampled independently from PPO rollouts.
+        mean_foothold_nll = 0.0
+        mean_foothold_rmse = 0.0
+        mean_foothold_up_rmse = 0.0
+        mean_foothold_down_rmse = 0.0
+        foothold_up_updates = 0
+        foothold_down_updates = 0
+        foothold_updates = 0
+        if (
+            self.foothold_imagination is not None
+            and self.foothold_replay is not None
+            and self.foothold_replay.num_samples > 0
+        ):
+            batch_size = min(self.foothold_batch_size, self.foothold_replay.num_samples)
+            for _ in range(self.foothold_updates_per_iteration):
+                privileged_obs, actions, targets, foot_ids, terrain_ids = self.foothold_replay.sample(
+                    batch_size
+                )
+                mu, sigma = self.foothold_imagination(privileged_obs, actions)
+                batch_indices = torch.arange(batch_size, device=self.device)
+                selected_mu = mu[batch_indices, foot_ids]
+                selected_sigma = sigma[batch_indices, foot_ids]
+                foothold_nll = FootholdImagination.gaussian_nll(
+                    selected_mu, selected_sigma, targets
+                )
+                self.foothold_optimizer.zero_grad()
+                foothold_nll.backward()
+                if self.is_multi_gpu:
+                    for parameter in self.foothold_imagination.parameters():
+                        if parameter.grad is not None:
+                            torch.distributed.all_reduce(
+                                parameter.grad, op=torch.distributed.ReduceOp.SUM
+                            )
+                            parameter.grad /= self.gpu_world_size
+                nn.utils.clip_grad_norm_(self.foothold_imagination.parameters(), self.max_grad_norm)
+                self.foothold_optimizer.step()
+                mean_foothold_nll += foothold_nll.item()
+                squared_distance = torch.sum(torch.square(selected_mu.detach() - targets), dim=-1)
+                mean_foothold_rmse += torch.sqrt(torch.mean(squared_distance)).item()
+                up_mask = terrain_ids == 0
+                if up_mask.any():
+                    mean_foothold_up_rmse += torch.sqrt(torch.mean(squared_distance[up_mask])).item()
+                    foothold_up_updates += 1
+                down_mask = terrain_ids == 1
+                if down_mask.any():
+                    mean_foothold_down_rmse += torch.sqrt(torch.mean(squared_distance[down_mask])).item()
+                    foothold_down_updates += 1
+                foothold_updates += 1
+        if foothold_updates:
+            mean_foothold_nll /= foothold_updates
+            mean_foothold_rmse /= foothold_updates
+        if foothold_up_updates:
+            mean_foothold_up_rmse /= foothold_up_updates
+        if foothold_down_updates:
+            mean_foothold_down_rmse /= foothold_down_updates
+
         # -- Clear the storage
         self.storage.clear()
 
@@ -578,6 +773,14 @@ class AMPOldHIMPPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.foothold_imagination is not None:
+            loss_dict["foothold_nll"] = mean_foothold_nll
+            loss_dict["foothold_rmse"] = mean_foothold_rmse
+            loss_dict["foothold_upstairs_rmse"] = mean_foothold_up_rmse
+            loss_dict["foothold_downstairs_rmse"] = mean_foothold_down_rmse
+            loss_dict["foothold_labeled_samples"] = float(self.foothold_replay.num_samples)
+            loss_dict["foothold_pending_samples"] = float(self._foothold_pending_count.sum().item())
+            loss_dict["foothold_discarded_total"] = float(self._foothold_discarded_total)
 
         return loss_dict
 
@@ -589,6 +792,8 @@ class AMPOldHIMPPO:
         """Broadcast model parameters to all GPUs."""
         # obtain the model parameters on current GPU
         model_params = [self.policy.state_dict(), self.discriminator.state_dict()]
+        if self.foothold_imagination is not None:
+            model_params.append(self.foothold_imagination.state_dict())
         if self.rnd:
             model_params.append(self.rnd.predictor.state_dict())
         # broadcast the model parameters
@@ -596,8 +801,12 @@ class AMPOldHIMPPO:
         # load the model parameters on all GPUs from source GPU
         self.policy.load_state_dict(model_params[0])
         self.discriminator.load_state_dict(model_params[1])
+        next_model_idx = 2
+        if self.foothold_imagination is not None:
+            self.foothold_imagination.load_state_dict(model_params[next_model_idx])
+            next_model_idx += 1
         if self.rnd:
-            self.rnd.predictor.load_state_dict(model_params[2])
+            self.rnd.predictor.load_state_dict(model_params[next_model_idx])
 
     def reduce_parameters(self):
         """Collect gradients from all GPUs and average them.

@@ -9,9 +9,10 @@
 
 """Implementation of transitions storage for RL-agent."""
 
+from .foothold_replay_buffer import FootholdReplayBuffer
 from .him_rollout_storage import HimRolloutStorage
 from .old_him_rollout_storage import OldHimRolloutStorage
 from .replay_buffer import ReplayBuffer
 from .rollout_storage import RolloutStorage
 
-__all__ = ["HimRolloutStorage", "OldHimRolloutStorage", "RolloutStorage", "ReplayBuffer"]
+__all__ = ["FootholdReplayBuffer", "HimRolloutStorage", "OldHimRolloutStorage", "RolloutStorage", "ReplayBuffer"]

@@ -1457,6 +1457,21 @@ class RewardsCfg:
             ),
         },
     )
+    imagined_foothold_guidance = RewTerm(
+        func=mdp.imagined_foothold_guidance,
+        weight=0.25,
+        params={
+            "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
+            "patch_size": (0.225, 0.10),
+            "patch_resolution": 0.05,
+            "support_height_tolerance": 0.03,
+            "reward_sigma": 0.25,
+            "curriculum_level_threshold": 3,
+            "terrain_types": ("stairs_up", "stairs_down"),
+            "downstairs_terrain_types": ("stairs_down",),
+            "downstairs_scale": 1.5,
+        },
+    )
 
     volume_points_penetration = RewTerm(
         func=mdp.volume_points_penetration,

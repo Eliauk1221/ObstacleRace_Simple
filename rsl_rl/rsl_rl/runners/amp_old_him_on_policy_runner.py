@@ -118,6 +118,12 @@ class AmpOldHimOnPolicyRunner:
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
                     actions = self.alg.act(obs)
+                    foothold_prediction = self.alg.predict_footholds()
+                    if foothold_prediction is not None and hasattr(
+                        self.env.unwrapped, "set_imagined_footholds"
+                    ):
+                        mu, sigma = foothold_prediction
+                        self.env.unwrapped.set_imagined_footholds(mu, sigma)
                     # Step the environment
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     next_amp_obs = obs["discriminator"][:, -1].clone().detach()
@@ -360,6 +366,9 @@ class AmpOldHimOnPolicyRunner:
         if hasattr(self.alg, "rnd") and self.alg.rnd:
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
             saved_dict["rnd_optimizer_state_dict"] = self.alg.rnd_optimizer.state_dict()
+        if self.alg.foothold_imagination is not None:
+            saved_dict["foothold_imagination_state_dict"] = self.alg.foothold_imagination.state_dict()
+            saved_dict["foothold_optimizer_state_dict"] = self.alg.foothold_optimizer.state_dict()
         torch.save(saved_dict, path)
 
         # upload model to external logging service
@@ -368,6 +377,7 @@ class AmpOldHimOnPolicyRunner:
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None):
         loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+        self.foothold_checkpoint_loaded = "foothold_imagination_state_dict" in loaded_dict
         # -- Load model
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
         if resumed_training:
@@ -375,6 +385,8 @@ class AmpOldHimOnPolicyRunner:
         # -- Load RND model if used
         if hasattr(self.alg, "rnd") and self.alg.rnd:
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
+        if self.alg.foothold_imagination is not None and "foothold_imagination_state_dict" in loaded_dict:
+            self.alg.foothold_imagination.load_state_dict(loaded_dict["foothold_imagination_state_dict"])
         # -- load optimizer if used
         if load_optimizer and resumed_training:
             # -- algorithm optimizer
@@ -382,6 +394,8 @@ class AmpOldHimOnPolicyRunner:
             # -- RND optimizer if used
             if hasattr(self.alg, "rnd") and self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+            if self.alg.foothold_optimizer is not None and "foothold_optimizer_state_dict" in loaded_dict:
+                self.alg.foothold_optimizer.load_state_dict(loaded_dict["foothold_optimizer_state_dict"])
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -400,6 +414,8 @@ class AmpOldHimOnPolicyRunner:
         self.discriminator.train()
         # -- HIM
         self.alg.policy.him_estimator.train()
+        if self.alg.foothold_imagination is not None:
+            self.alg.foothold_imagination.train()
         # -- RND
         if hasattr(self.alg, "rnd") and self.alg.rnd:
             self.alg.rnd.train()
@@ -411,6 +427,8 @@ class AmpOldHimOnPolicyRunner:
         self.discriminator.eval()
         # -- HIM
         self.alg.policy.him_estimator.eval()
+        if self.alg.foothold_imagination is not None:
+            self.alg.foothold_imagination.eval()
         # -- RND
         if hasattr(self.alg, "rnd") and self.alg.rnd:
             self.alg.rnd.eval()

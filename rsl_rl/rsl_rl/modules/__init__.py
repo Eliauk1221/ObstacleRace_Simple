@@ -12,6 +12,7 @@
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
 from .discriminator import Discriminator
+from .foothold_imagination import FootholdImagination
 from .him_actor_critic import HimActorCritic
 from .pim_actor_critic import PIMActorCritic
 from .pim_depth_actor_critic import PIMDepthActorCritic
@@ -46,4 +47,5 @@ __all__ = [
     "StudentTeacher",
     "StudentTeacherRecurrent",
     "Discriminator",
+    "FootholdImagination",
 ]
