@@ -614,6 +614,18 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     seed=42,
     use_cache=False,
     sub_terrains={
+        "plane": HfNoisyPyramidSlopedTerrainCfg(
+            proportion=0.1,
+            feature_extent_m=8.0,
+            slope_range=(0.0, 0.0),
+            noise_range=(0.0, 0.0),
+            noise_step=0.01,
+            num_obstacles=0,
+            obstacle_size=(0.2, 0.4),
+            obstacle_height=(0.5, 1.5),
+            platform_width=2.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
             feature_extent_m=8.0,
@@ -660,15 +672,15 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             noise_step=0.02,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        "gap": HfMultiGapTerrainCfg(
-            proportion=0.1,
-            feature_extent_m=8.0,
-            gap_width_pixels_range=(3, 10),
-            gap_depth_range=(0.2, 1.0),
-            step_height_range=(0.03, 0.1),
-            platform_width=2.0,
-            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
-        ),
+        # "gap": HfMultiGapTerrainCfg(
+        #     proportion=0.1,
+        #     feature_extent_m=8.0,
+        #     gap_width_pixels_range=(3, 10),
+        #     gap_depth_range=(0.2, 1.0),
+        #     step_height_range=(0.03, 0.1),
+        #     platform_width=2.0,
+        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        # ),
         # "interlaced_corridor_wedges": HfInterlacedCorridorWedgesTerrainCfg(
         #     proportion=0.1,
         #     corridor_half_width_m=1.5,
