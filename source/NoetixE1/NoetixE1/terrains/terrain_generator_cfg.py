@@ -621,6 +621,17 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             platform_width=2.0,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
+        "rough_flat": HfNoisyPyramidSlopedTerrainCfg(
+            proportion=0.1,
+            slope_range=(0.0, 0.0),
+            noise_range=(0.01, 0.05),
+            noise_step=0.01,
+            num_obstacles=0,
+            obstacle_size=(0.2, 0.4),
+            obstacle_height=(0.5, 1.5),
+            platform_width=2.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
             slope_range=(0.1, 0.4),
@@ -661,6 +672,13 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             border_width=0.5,
             noise_range=(0.00, 0.00),
             noise_step=0.02,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
+            proportion=0.1,
+            obstacle_width_range=(0.3, 1.0),
+            obstacle_height_range=(0.05, 0.30),
+            num_obstacles=30,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
         # "gap": HfMultiGapTerrainCfg(
