@@ -17,15 +17,6 @@ if TYPE_CHECKING:
     from . import custom_terrains_cfg
 
 
-def _resolve_feature_extent(cfg) -> tuple[float, float]:
-    """Return the effective feature width and length inside the terrain cell."""
-    extent = getattr(cfg, "feature_extent_m", None)
-    if extent is not None:
-        extent = float(extent)
-        return extent, extent
-    return float(cfg.size[0]), float(cfg.size[1])
-
-
 @height_field_to_mesh
 def noisy_pyramid_sloped_terrain(
     difficulty: float, cfg: custom_terrains_cfg.HfNoisyPyramidSlopedTerrainCfg
@@ -54,25 +45,26 @@ def noisy_pyramid_sloped_terrain(
     # -- horizontal scale
     width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
     length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
-    feature_w, feature_h = _resolve_feature_extent(cfg)
-    feature_half_w = feature_w / 2.0
-    feature_half_h = feature_h / 2.0
     # -- height
-    # We want the height to be 1/2 of the feature width since the terrain is a pyramid.
-    height_max = int(slope * feature_w / 2 / cfg.vertical_scale)
+    # we want the height to be 1/2 of the width since the terrain is a pyramid
+    height_max = int(slope * cfg.size[0] / 2 / cfg.vertical_scale)
     # -- center of the terrain
     center_x = int(width_pixels / 2)
     center_y = int(length_pixels / 2)
 
-    # Build a centered feature region; the outer margin stays at ground height.
-    h_scale = cfg.horizontal_scale
-    ix = np.arange(width_pixels, dtype=np.float64)[:, None]
-    iy = np.arange(length_pixels, dtype=np.float64)[None, :]
-    px = (ix + 0.5) * h_scale - cfg.size[0] * 0.5
-    py = (iy + 0.5) * h_scale - cfg.size[1] * 0.5
-    norm_x = np.clip((feature_half_w - np.abs(px)) / max(feature_half_w, 1e-9), 0.0, 1.0)
-    norm_y = np.clip((feature_half_h - np.abs(py)) / max(feature_half_h, 1e-9), 0.0, 1.0)
-    hf_raw = height_max * norm_x * norm_y
+    # create a meshgrid of the terrain
+    x = np.arange(0, width_pixels)
+    y = np.arange(0, length_pixels)
+    xx, yy = np.meshgrid(x, y, sparse=True)
+    # offset the meshgrid to the center of the terrain
+    xx = (center_x - np.abs(center_x - xx)) / center_x
+    yy = (center_y - np.abs(center_y - yy)) / center_y
+    # reshape the meshgrid to be 2D
+    xx = xx.reshape(width_pixels, 1)
+    yy = yy.reshape(1, length_pixels)
+    # create a sloped surface
+    hf_raw = np.zeros((width_pixels, length_pixels))
+    hf_raw = height_max * xx * yy
 
     # create a flat platform at the center of the terrain
     platform_width = int(cfg.platform_width / cfg.horizontal_scale / 2)
@@ -212,18 +204,12 @@ def noisy_pyramid_stairs_terrain(
     else:
         platform_width = int(cfg.platform_width / cfg.horizontal_scale)
 
-    feature_w, feature_h = _resolve_feature_extent(cfg)
-    feature_w_pixels = int(feature_w / cfg.horizontal_scale)
-    feature_h_pixels = int(feature_h / cfg.horizontal_scale)
-    x0 = max(0, (width_pixels - feature_w_pixels) // 2)
-    y0 = max(0, (length_pixels - feature_h_pixels) // 2)
-
     # create a terrain with a flat platform at the center
     hf_raw = np.zeros((width_pixels, length_pixels))
-    # Add steps inside the centered feature region; the outer margin remains flat.
+    # add the steps
     current_step_height = 0
-    start_x, start_y = x0, y0
-    stop_x, stop_y = x0 + feature_w_pixels, y0 + feature_h_pixels
+    start_x, start_y = 0, 0
+    stop_x, stop_y = width_pixels, length_pixels
     while (stop_x - start_x) > platform_width and (stop_y - start_y) > platform_width:
         # increment position
         # -- x
@@ -324,8 +310,7 @@ def multi_gap_terrain(
     # Used by platform: platform_width / 2
     # Reserved for outer ground: outer_ground_width
     # Each gap ring needs: gap_width + ground_ring_width (on each side, so * 2 total)
-    feature_w, feature_h = _resolve_feature_extent(cfg)
-    terrain_half_size = min(feature_w, feature_h) / 2
+    terrain_half_size = min(cfg.size[0], cfg.size[1]) / 2
     available_space = terrain_half_size - (platform_width / 2)
     ring_pair_width = gap_width + ground_ring_width  # One gap + one ground ring
     

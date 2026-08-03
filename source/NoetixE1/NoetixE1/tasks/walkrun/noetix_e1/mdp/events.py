@@ -217,7 +217,6 @@ def reset_root_state_amp(
     terrain_specific_yaw: dict[str, list[float] | tuple[float, float]] | None = None,
     terrain_specific_pos_range: dict[str, dict[str, tuple[float, float]]] | None = None,
     terrain_specific_motion_files: dict[str, list[str]] | None = None,
-    terrain_specific_rsi_motion_files: dict[str, list[str]] | None = None,
     terrain_specific_motion_level_range: tuple[int, int] | None = None,
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
     terrain_specific_spawn_z_offset: dict[str, float] | None = None,
@@ -350,12 +349,11 @@ def reset_root_state_amp(
         # get frames of amp motions (optionally from terrain-specific motion files)
         use_full_motion_state = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
         terrain_specific_motion_files = terrain_specific_motion_files or {}
-        terrain_specific_rsi_motion_files = terrain_specific_rsi_motion_files or {}
         motion_files_list = list(getattr(env.unwrapped.cfg, "motion_files", []) or [])
-        if (terrain_specific_motion_files or terrain_specific_rsi_motion_files) and motion_files_list:
+        if terrain_specific_motion_files and motion_files_list:
             from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
 
-            full_state_terrain_to_indices = {}
+            terrain_to_indices = {}
             for terrain_type, paths in terrain_specific_motion_files.items():
                 indices = []
                 for p in paths:
@@ -365,19 +363,7 @@ def reset_root_state_amp(
                     except ValueError:
                         pass
                 if indices:
-                    full_state_terrain_to_indices[terrain_type] = indices
-
-            rsi_terrain_to_indices = {}
-            for terrain_type, paths in terrain_specific_rsi_motion_files.items():
-                indices = []
-                for p in paths:
-                    try:
-                        i = motion_files_list.index(p)
-                        indices.append(i)
-                    except ValueError:
-                        pass
-                if indices:
-                    rsi_terrain_to_indices[terrain_type] = indices
+                    terrain_to_indices[terrain_type] = indices
 
             # 仅在指定地形等级范围内启用“指定地形用指定 motion”；None 表示全部等级启用
             if terrain_specific_motion_level_range is not None:
@@ -407,38 +393,27 @@ def reset_root_state_amp(
                     (len(env_ids), frame_dim), device=env.device, dtype=env.motion_loader.preloaded_states.dtype
                 )
                 for tname, local_indices in groups.items():
-                    full_state_allowed = full_state_terrain_to_indices.get(tname) if tname else None
-                    rsi_allowed = rsi_terrain_to_indices.get(tname) if tname else None
-                    if full_state_allowed is not None and len(full_state_allowed) > 0:
+                    allowed = terrain_to_indices.get(tname) if tname else None
+                    if allowed is not None and len(allowed) > 0:
                         # 按等级范围拆分：在范围内的从指定 motion 采样并给满状态，否则从全部 motion 普通采样
                         level_ok_sub = level_ok[local_indices]
                         in_range_where = torch.where(level_ok_sub)[0]
                         out_range_where = torch.where(~level_ok_sub)[0]
                         if in_range_where.numel() > 0:
                             batch_in = env.motion_loader.get_full_frame_batch(
-                                in_range_where.numel(), allowed_traj_idxs=full_state_allowed
+                                in_range_where.numel(), allowed_traj_idxs=allowed
                             )
                             for j, pos in enumerate(in_range_where):
                                 li = local_indices[pos.item()]
                                 frames[li] = batch_in[j]
                                 use_full_motion_state[li] = True
                         if out_range_where.numel() > 0:
-                            if rsi_allowed is not None and len(rsi_allowed) > 0:
-                                batch_out = env.motion_loader.get_full_frame_batch(
-                                    out_range_where.numel(), allowed_traj_idxs=rsi_allowed
-                                )
-                            else:
-                                batch_out = env.motion_loader.get_full_frame_batch(out_range_where.numel())
+                            batch_out = env.motion_loader.get_full_frame_batch(out_range_where.numel())
                             for j, pos in enumerate(out_range_where):
                                 li = local_indices[pos.item()]
                                 frames[li] = batch_out[j]
                     else:
-                        if rsi_allowed is not None and len(rsi_allowed) > 0:
-                            batch = env.motion_loader.get_full_frame_batch(
-                                len(local_indices), allowed_traj_idxs=rsi_allowed
-                            )
-                        else:
-                            batch = env.motion_loader.get_full_frame_batch(len(local_indices))
+                        batch = env.motion_loader.get_full_frame_batch(len(local_indices))
                         for j, li in enumerate(local_indices):
                             frames[li] = batch[j]
             else:

@@ -586,9 +586,6 @@ from .terrain_generator import FiledTerrainGenerator
 class FiledTerrainGeneratorCfg(TerrainGeneratorCfgBase):
     class_type: type = FiledTerrainGenerator
 
-    standard_feature_extent_m: float = 8.0
-    """Effective content side for generic terrains when the global cell is enlarged for figure8."""
-
 
 from isaaclab.terrains import FlatPatchSamplingCfg
 
@@ -603,8 +600,7 @@ _DEPTH6_FLAT_PATCH_TARGET = {
 # DEPTH_TERRAINS_CFG6：walkrun 主用；含交叉斜坡的 approach 与 smooth entry/exit 变体
 DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     curriculum=True,
-    size=(12.0, 12.0),
-    standard_feature_extent_m=8.0,
+    size=(8.0, 8.0),
     border_width=20.0,
     num_rows=10,
     num_cols=10,
@@ -616,7 +612,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     sub_terrains={
         "plane": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
-            feature_extent_m=8.0,
             slope_range=(0.0, 0.0),
             noise_range=(0.0, 0.0),
             noise_step=0.01,
@@ -628,7 +623,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
-            feature_extent_m=8.0,
             slope_range=(0.1, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -640,7 +634,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "noisy_slope_down": HfNoisyInvertedPyramidSlopedTerrainCfg(
             proportion=0.1,
-            feature_extent_m=8.0,
             slope_range=(0.15, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -652,7 +645,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "stairs_up": HfNoisyInvertedPyramidStairsTerrainCfg(
             proportion=0.1,
-            feature_extent_m=8.0,
             step_height_range=(0.05, 0.25),
             step_width_pixels_range=(10, 5),
             platform_width=2.0,
@@ -663,7 +655,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "stairs_down": HfNoisyPyramidStairsTerrainCfg(
             proportion=0.1,
-            feature_extent_m=8.0,
             step_height_range=(0.05, 0.25),
             step_width_pixels_range=(10, 5),
             platform_width=2.0,
@@ -674,7 +665,6 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         # "gap": HfMultiGapTerrainCfg(
         #     proportion=0.1,
-        #     feature_extent_m=8.0,
         #     gap_width_pixels_range=(3, 10),
         #     gap_depth_range=(0.2, 1.0),
         #     step_height_range=(0.03, 0.1),

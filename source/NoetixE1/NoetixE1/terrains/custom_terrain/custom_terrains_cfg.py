@@ -15,15 +15,7 @@ from isaaclab.terrains.height_field.hf_terrains_cfg import HfTerrainBaseCfg
 
 
 @configclass
-class HfFeatureExtentCfg:
-    """Restrict the generated feature to a centered square within a larger terrain cell."""
-
-    feature_extent_m: float | None = None
-    """Effective feature side length in meters; ``None`` uses the full terrain cell."""
-
-
-@configclass
-class HfNoisyPyramidSlopedTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
+class HfNoisyPyramidSlopedTerrainCfg(HfTerrainBaseCfg):
     """Configuration for a pyramid sloped height field terrain with noise."""
 
     function = custom_terrains.noisy_pyramid_sloped_terrain
@@ -81,7 +73,7 @@ class HfNoisyInvertedPyramidSlopedTerrainCfg(HfNoisyPyramidSlopedTerrainCfg):
 
 
 @configclass
-class HfNoisyPyramidStairsTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
+class HfNoisyPyramidStairsTerrainCfg(HfTerrainBaseCfg):
     """Configuration for a pyramid stair height field terrain with noise."""
 
     function = custom_terrains.noisy_pyramid_stairs_terrain
@@ -144,7 +136,7 @@ class HfNoisyInvertedPyramidStairsTerrainCfg(HfNoisyPyramidStairsTerrainCfg):
 
 
 @configclass
-class HfMultiGapTerrainCfg(HfFeatureExtentCfg, HfTerrainBaseCfg):
+class HfMultiGapTerrainCfg(HfTerrainBaseCfg):
     """Configuration for a height field terrain with nested "回字形" (ring-shaped) gaps of configurable depth.
 
     Creates nested ring-shaped gap structures (一环套一环). The structure from outside to inside:

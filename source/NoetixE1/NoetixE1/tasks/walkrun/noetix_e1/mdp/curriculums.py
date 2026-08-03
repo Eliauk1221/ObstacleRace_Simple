@@ -590,16 +590,10 @@ def _env_ids_on_terrain_types(
     return _check_terrain_types_from_positions(env, positions, terrain_types, col_indices=col_indices)
 
 
-def _standard_terrain_curriculum_half_extent(terrain_gen_cfg) -> float:
-    """Return the generic terrain's effective half-width for level-up distance."""
-    return 0.5 * float(getattr(terrain_gen_cfg, "standard_feature_extent_m", 8.0))
-
-
 def terrain_levels_vel_with_termination(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    standard_terrain_curriculum_half_extent_m: float | None = None,
     s_curve_terrain_types: tuple[str, ...] | list[str] = (),
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
@@ -640,11 +634,6 @@ def terrain_levels_vel_with_termination(
 
     # Get terrain configuration
     terrain_gen_cfg = terrain.cfg.terrain_generator
-    curriculum_half_extent = (
-        float(standard_terrain_curriculum_half_extent_m)
-        if standard_terrain_curriculum_half_extent_m is not None
-        else _standard_terrain_curriculum_half_extent(terrain_gen_cfg)
-    )
 
     # Initialize or update _adaptive_terrain_state if terrain generator supports it
     env_id_str = str(id(env))
@@ -766,7 +755,7 @@ def terrain_levels_vel_with_termination(
         has_vel_mask = has_forward_velocity[nf_local]
         if has_vel_mask.any():
             sub = nf_local[torch.where(has_vel_mask)[0]]
-            move_up[sub] = distance[sub] > curriculum_half_extent
+            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
             move_down_temp = distance[sub] < command_vel_magnitude[sub] * env.max_episode_length_s * 0.5
             move_down_temp *= ~move_up[sub]
             move_down[sub] = move_down_temp
@@ -774,7 +763,7 @@ def terrain_levels_vel_with_termination(
         no_vel_mask = ~has_forward_velocity[nf_local]
         if no_vel_mask.any():
             sub = nf_local[torch.where(no_vel_mask)[0]]
-            move_up[sub] = distance[sub] > curriculum_half_extent
+            move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
             sub_env_ids = env_ids_tensor[sub]
             fell_down = env.termination_manager.get_term("fall_down_in_some_terrain")[sub_env_ids]
             move_down[sub] = fell_down

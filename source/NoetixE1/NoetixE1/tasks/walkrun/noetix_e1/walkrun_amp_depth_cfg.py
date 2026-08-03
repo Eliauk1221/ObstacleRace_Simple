@@ -666,22 +666,6 @@ class EventCfg:
                 "interlaced_corridor_wedges_smooth_exit": -0.6,
                 "interlaced_corridor_wedges_smooth_entry_exit": -0.6,
             },
-            "terrain_specific_rsi_motion_files": {
-                "s_curve": [
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_standing_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_sidewalk_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_walk_backward_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_turning_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_walk_forward_723.json",
-                ],
-                "s_curve_reverse": [
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_standing_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_sidewalk_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_walk_backward_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_turning_723.json",
-                    f"{ASSET_DIR}/datasets/walkrun/e1_fixhand/e1_walk_forward_723.json",
-                ],
-            },
             "terrain_specific_figure8_spawn": {
                 "spawn_mode": "center_cutout",
                 "bridge_height": 0.1,
