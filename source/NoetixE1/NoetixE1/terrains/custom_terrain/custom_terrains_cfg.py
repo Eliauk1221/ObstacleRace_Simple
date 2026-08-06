@@ -73,6 +73,34 @@ class HfNoisyInvertedPyramidSlopedTerrainCfg(HfNoisyPyramidSlopedTerrainCfg):
 
 
 @configclass
+class HfThinObstaclesTerrainCfg(HfTerrainBaseCfg):
+    """Flat height field with randomly placed, non-overlapping thin positive obstacles."""
+
+    function = custom_terrains.thin_obstacles_terrain
+
+    obstacle_width: float = 0.1
+    """The short horizontal dimension of each obstacle, in meters."""
+
+    obstacle_length_range: tuple[float, float] = (0.5, 1.5)
+    """The sampled long horizontal dimension of each obstacle, in meters."""
+
+    obstacle_height: float = 0.1
+    """The positive obstacle height, in meters."""
+
+    num_obstacles: int = 30
+    """The exact number of obstacles to place."""
+
+    platform_width: float = 1.0
+    """The square center platform kept clear for spawning, in meters."""
+
+    boundary_margin: float = 0.5
+    """Minimum distance from each terrain tile boundary, in meters."""
+
+    max_sampling_attempts: int = 200
+    """Maximum placement attempts per obstacle before generation fails."""
+
+
+@configclass
 class HfNoisyPyramidStairsTerrainCfg(HfTerrainBaseCfg):
     """Configuration for a pyramid stair height field terrain with noise."""
 
@@ -396,6 +424,29 @@ class HfInterlacedCorridorWedgesTerrainCfg(HfTerrainBaseCfg):
 
     corridor_edge_fade_m: float = 0.06
     """在 ``|y| > corridor_half_width_m`` 外按此宽度将高度收到 0。"""
+
+
+@configclass
+class HfContinuousWaveSlopesTerrainCfg(HfTerrainBaseCfg):
+    """沿 ``+x`` 连续布置两组“上坡-平台-下坡”的全宽斜坡。"""
+
+    function = custom_terrains.continuous_wave_slopes_terrain
+
+    slope_surface_length_m: float = 1.5
+    """每个坡面的实际坡面长度（米），不是沿 x 轴的投影长度。"""
+
+    slope_angle_deg: float = 15.0
+    """坡面与水平面的夹角（度）。"""
+
+    platform_length_m: float = 0.8
+    """每个峰顶连接段沿 x 轴的长度（米）。"""
+
+    half_width_m: float = 1.2
+    """可行走地形半宽（米），对应总宽 2.4 m。"""
+
+    edge_transition_m: float = 0.05
+    """侧边高度收敛宽度（米）；默认等于一个高度场像素。"""
+
 
 @configclass
 class HfFigure8BridgeTerrainCfg(HfTerrainBaseCfg):

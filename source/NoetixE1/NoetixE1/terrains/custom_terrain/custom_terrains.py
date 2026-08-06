@@ -155,6 +155,82 @@ def noisy_pyramid_sloped_terrain(
 
 
 @height_field_to_mesh
+def thin_obstacles_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfThinObstaclesTerrainCfg
+) -> np.ndarray:
+    """Generate a flat terrain with randomly oriented, non-overlapping positive bars."""
+    del difficulty
+
+    width_pixels = int(round(cfg.size[0] / cfg.horizontal_scale))
+    length_pixels = int(round(cfg.size[1] / cfg.horizontal_scale))
+    obstacle_width_pixels = max(1, int(round(cfg.obstacle_width / cfg.horizontal_scale)))
+    length_min_pixels = max(1, int(round(cfg.obstacle_length_range[0] / cfg.horizontal_scale)))
+    length_max_pixels = max(length_min_pixels, int(round(cfg.obstacle_length_range[1] / cfg.horizontal_scale)))
+    obstacle_height_pixels = int(round(cfg.obstacle_height / cfg.vertical_scale))
+    boundary_margin_pixels = max(0, int(round(cfg.boundary_margin / cfg.horizontal_scale)))
+    platform_width_pixels = max(0, int(round(cfg.platform_width / cfg.horizontal_scale)))
+
+    if boundary_margin_pixels * 2 + obstacle_width_pixels > min(width_pixels, length_pixels):
+        raise ValueError("boundary_margin leaves no room for thin obstacles")
+    if obstacle_height_pixels <= 0:
+        raise ValueError("obstacle_height must be positive")
+
+    hf_raw = np.zeros((width_pixels, length_pixels), dtype=np.float32)
+    occupied = np.zeros((width_pixels, length_pixels), dtype=bool)
+
+    platform_x1 = (width_pixels - platform_width_pixels) // 2
+    platform_x2 = platform_x1 + platform_width_pixels
+    platform_y1 = (length_pixels - platform_width_pixels) // 2
+    platform_y2 = platform_y1 + platform_width_pixels
+
+    x_min = boundary_margin_pixels
+    x_max = width_pixels - boundary_margin_pixels
+    y_min = boundary_margin_pixels
+    y_max = length_pixels - boundary_margin_pixels
+
+    for obstacle_index in range(cfg.num_obstacles):
+        placed = False
+        for _ in range(cfg.max_sampling_attempts):
+            obstacle_length_pixels = int(
+                np.random.randint(length_min_pixels, length_max_pixels + 1)
+            )
+            if np.random.randint(0, 2) == 0:
+                size_x, size_y = obstacle_length_pixels, obstacle_width_pixels
+            else:
+                size_x, size_y = obstacle_width_pixels, obstacle_length_pixels
+
+            if size_x > x_max - x_min or size_y > y_max - y_min:
+                continue
+
+            x_start = int(np.random.randint(x_min, x_max - size_x + 1))
+            y_start = int(np.random.randint(y_min, y_max - size_y + 1))
+            x_stop = x_start + size_x
+            y_stop = y_start + size_y
+
+            overlaps_platform = (
+                x_start < platform_x2
+                and x_stop > platform_x1
+                and y_start < platform_y2
+                and y_stop > platform_y1
+            )
+            if overlaps_platform or occupied[x_start:x_stop, y_start:y_stop].any():
+                continue
+
+            occupied[x_start:x_stop, y_start:y_stop] = True
+            hf_raw[x_start:x_stop, y_start:y_stop] = obstacle_height_pixels
+            placed = True
+            break
+
+        if not placed:
+            raise RuntimeError(
+                f"Could not place thin obstacle {obstacle_index + 1}/{cfg.num_obstacles}; "
+                "reduce num_obstacles or boundary/platform margins."
+            )
+
+    return np.rint(hf_raw).astype(np.int16)
+
+
+@height_field_to_mesh
 def noisy_pyramid_stairs_terrain(
     difficulty: float, cfg: custom_terrains_cfg.HfNoisyPyramidStairsTerrainCfg
 ) -> np.ndarray:
@@ -1068,6 +1144,73 @@ def interlaced_corridor_wedges_terrain(
 
     hf_raw = np.rint(h_m / v_scale).astype(np.float64)
     return hf_raw.astype(np.int16)
+
+
+@height_field_to_mesh
+def continuous_wave_slopes_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfContinuousWaveSlopesTerrainCfg
+) -> np.ndarray:
+    """Generate two continuous up-platform-down waves along world ``+x``."""
+    del difficulty  # This terrain has fixed geometry at every curriculum level.
+
+    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
+    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
+    h_scale = float(cfg.horizontal_scale)
+    v_scale = float(cfg.vertical_scale)
+
+    surface_length = float(cfg.slope_surface_length_m)
+    angle_rad = math.radians(float(cfg.slope_angle_deg))
+    platform_length = float(cfg.platform_length_m)
+    half_width = float(cfg.half_width_m)
+    edge_transition = float(cfg.edge_transition_m)
+    if surface_length <= 0.0 or platform_length <= 0.0 or half_width <= 0.0:
+        raise ValueError("Slope length, platform length, and half width must be positive.")
+    if not 0.0 < angle_rad < 0.5 * math.pi:
+        raise ValueError(f"slope_angle_deg must be in (0, 90), got {cfg.slope_angle_deg}.")
+    if edge_transition < 0.0:
+        raise ValueError(f"edge_transition_m must be non-negative, got {edge_transition}.")
+
+    horizontal_run = surface_length * math.cos(angle_rad)
+    peak_height = surface_length * math.sin(angle_rad)
+    wave_length = 2.0 * horizontal_run + platform_length
+    total_length = 2.0 * wave_length
+    x_start = -0.5 * total_length
+    if total_length > float(cfg.size[0]) + 1e-6:
+        raise ValueError(
+            f"Continuous wave length {total_length:.4f} m exceeds terrain x size {cfg.size[0]:.4f} m."
+        )
+    if 2.0 * (half_width + edge_transition) > float(cfg.size[1]) + 1e-6:
+        raise ValueError("Continuous wave width plus edge transition exceeds terrain y size.")
+
+    ix = np.arange(width_pixels, dtype=np.float64)[:, None]
+    iy = np.arange(length_pixels, dtype=np.float64)[None, :]
+    x_m = (ix + 0.5) * h_scale - 0.5 * float(cfg.size[0])
+    y_m = (iy + 0.5) * h_scale - 0.5 * float(cfg.size[1])
+
+    phase = x_m - x_start
+    wave_phase = np.mod(phase, wave_length)
+    height_m = np.where(
+        wave_phase < horizontal_run,
+        peak_height * wave_phase / horizontal_run,
+        np.where(
+            wave_phase < horizontal_run + platform_length,
+            peak_height,
+            peak_height * (wave_length - wave_phase) / horizontal_run,
+        ),
+    )
+    in_pattern = (phase >= 0.0) & (phase <= total_length)
+    height_m = np.where(in_pattern, np.clip(height_m, 0.0, peak_height), 0.0)
+
+    if edge_transition > 0.0:
+        lateral_footprint = np.clip(
+            (half_width + edge_transition - np.abs(y_m)) / edge_transition, 0.0, 1.0
+        )
+    else:
+        lateral_footprint = (np.abs(y_m) <= half_width).astype(np.float64)
+    height_m = height_m * lateral_footprint
+
+    return np.rint(height_m / v_scale).astype(np.int16)
+
 
 def _point_to_closed_polyline_dist(
     px: np.ndarray, py: np.ndarray, pts: np.ndarray

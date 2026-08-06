@@ -33,6 +33,7 @@ from .custom_terrain import (
     HfNoisyInvertedPyramidStairsTerrainCfg,
     HfNoisyPyramidSlopedTerrainCfg,
     HfNoisyPyramidStairsTerrainCfg,
+    HfThinObstaclesTerrainCfg,
     HfMultiGapTerrainCfg,
     HfSteppingStonesTerrainCfg,
     HfCrossSteppingStonesTerrainCfg,
@@ -41,6 +42,7 @@ from .custom_terrain import (
     HfDoubleFramePlatformTerrainCfg,
     HfSingleGapTerrainCfg,
     HfInterlacedCorridorWedgesTerrainCfg,
+    HfContinuousWaveSlopesTerrainCfg,
     MeshFigure8BridgeTerrainCfg,
     MeshSCurveTerrainCfg,
 )
@@ -633,7 +635,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
-            proportion=0.1,
+            proportion=0.05,
             slope_range=(0.1, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -644,7 +646,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
         "noisy_slope_down": HfNoisyInvertedPyramidSlopedTerrainCfg(
-            proportion=0.1,
+            proportion=0.05,
             slope_range=(0.15, 0.4),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
@@ -674,11 +676,21 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             noise_step=0.02,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
+        # "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
+        #     proportion=0.1,
+        #     obstacle_width_range=(0.3, 1.0),
+        #     obstacle_height_range=(0.05, 0.30),
+        #     num_obstacles=30,
+        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        # ),
+        "thin_obstacles": HfThinObstaclesTerrainCfg(
             proportion=0.1,
-            obstacle_width_range=(0.3, 1.0),
-            obstacle_height_range=(0.05, 0.30),
+            obstacle_width=0.1,
+            obstacle_length_range=(0.5, 1.5),
+            obstacle_height=0.1,
             num_obstacles=30,
+            platform_width=1.0,
+            boundary_margin=0.5,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
         # "gap": HfMultiGapTerrainCfg(
@@ -734,6 +746,15 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             edge_blend_m=0.02,
             corridor_edge_fade_m=0.06,
             pattern_origin_x_m=-3.0,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
+        "continuous_wave_slopes": HfContinuousWaveSlopesTerrainCfg(
+            proportion=0.1,
+            slope_surface_length_m=1.5,
+            slope_angle_deg=15.0,
+            platform_length_m=0.8,
+            half_width_m=1.2,
+            edge_transition_m=0.05,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
         # "figure8_bridge": MeshFigure8BridgeTerrainCfg(

@@ -62,6 +62,8 @@ parser.add_argument(
         "interlaced_corridor_wedges_approach",
         "interlaced_corridor_wedges_smooth_exit",
         "interlaced_corridor_wedges_smooth_entry_exit",
+        "continuous_wave_slopes",
+        "thin_obstacles",
         "figure8_bridge",
         "s_curve",
         "s_curve_reverse",
@@ -71,6 +73,8 @@ parser.add_argument(
         "interlaced_corridor_wedges_approach (坡前低侧出生), "
         "interlaced_corridor_wedges_smooth_exit (坡前出生并平滑移向低侧出口), "
         "interlaced_corridor_wedges_smooth_entry_exit (低侧平滑进入并从低侧退出), "
+        "continuous_wave_slopes (四段 1.5 m、15 度连续纵向斜坡), "
+        "thin_obstacles (随机分布的窄障碍物), "
         "figure8_bridge (闭合 8 字桥, Trimesh), "
         "s_curve / s_curve_reverse (正向/镜像 S 弯, Trimesh). "
         "Empty string disables."
@@ -390,6 +394,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         edge_blend_m=0.02,
                         corridor_edge_fade_m=0.06,
                         pattern_origin_x_m=-3.0,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "continuous_wave_slopes":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.HfContinuousWaveSlopesTerrainCfg(
+                        proportion=1.0,
+                        slope_surface_length_m=1.5,
+                        slope_angle_deg=15.0,
+                        platform_length_m=0.8,
+                        half_width_m=1.2,
+                        edge_transition_m=0.05,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "thin_obstacles":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.HfThinObstaclesTerrainCfg(
+                        proportion=1.0,
+                        obstacle_width=0.1,
+                        obstacle_length_range=(0.5, 1.5),
+                        obstacle_height=0.1,
+                        num_obstacles=30,
+                        platform_width=1.0,
+                        boundary_margin=0.5,
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )
                 }

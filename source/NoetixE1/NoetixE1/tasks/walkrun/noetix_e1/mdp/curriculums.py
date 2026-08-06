@@ -597,6 +597,8 @@ def terrain_levels_vel_with_termination(
     s_curve_terrain_types: tuple[str, ...] | list[str] = (),
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
+    continuous_wave_terrain_types: tuple[str, ...] | list[str] = (),
+    continuous_wave_success_term: str = "continuous_wave_slopes_reach_end",
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
@@ -610,6 +612,10 @@ def terrain_levels_vel_with_termination(
     **interlaced corridor approach / smooth-exit / smooth-entry-exit variants**
     - move_up：到达对应完成线且未横向越界
     - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
+
+    **continuous wave slopes**
+    - move_up：双脚越过配置的终点线
+    - move_down：episode 未以该精确成功项结束
 
     **其它地形**
     - 有前进速度指令：原距离课程
@@ -690,7 +696,10 @@ def terrain_levels_vel_with_termination(
         ),
     )
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
-    other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve)
+    is_continuous_wave = _env_ids_on_terrain_types(
+        env, env_ids_tensor, continuous_wave_terrain_types
+    )
+    other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve | is_continuous_wave)
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -748,6 +757,13 @@ def terrain_levels_vel_with_termination(
             lateral_exit
             | (stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end)
         )
+
+    if is_continuous_wave.any():
+        wave_local = torch.where(is_continuous_wave)[0]
+        wave_env_ids = env_ids_tensor[wave_local]
+        reached_end = env.termination_manager.get_term(continuous_wave_success_term)[wave_env_ids]
+        move_up[wave_local] = reached_end
+        move_down[wave_local] = ~reached_end
 
     # 其它地形：保留原距离 / 速度课程
     if other_terrain.any():

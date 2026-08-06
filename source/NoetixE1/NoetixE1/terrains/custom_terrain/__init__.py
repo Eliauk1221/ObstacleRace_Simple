@@ -6,6 +6,7 @@
 
 from .custom_terrains_cfg import (
     HfCrossSteppingStonesTerrainCfg,
+    HfContinuousWaveSlopesTerrainCfg,
     HfDoubleFramePlatformTerrainCfg,
     HfFramePlatformTerrainCfg,
     HfFigure8BridgeTerrainCfg,
@@ -18,12 +19,14 @@ from .custom_terrains_cfg import (
     HfNoisyInvertedPyramidStairsTerrainCfg,
     HfNoisyPyramidSlopedTerrainCfg,
     HfNoisyPyramidStairsTerrainCfg,
+    HfThinObstaclesTerrainCfg,
     HfSteppingStonesTerrainCfg,
     HfHurdleTerrainCfg,
 )
 
 __all__ = [
     "HfCrossSteppingStonesTerrainCfg",
+    "HfContinuousWaveSlopesTerrainCfg",
     "HfDoubleFramePlatformTerrainCfg",
     "HfFramePlatformTerrainCfg",
     "HfFigure8BridgeTerrainCfg",
@@ -35,6 +38,7 @@ __all__ = [
     "HfNoisyPyramidSlopedTerrainCfg",
     "HfNoisyInvertedPyramidSlopedTerrainCfg",
     "HfNoisyPyramidStairsTerrainCfg",
+    "HfThinObstaclesTerrainCfg",
     "HfNoisyInvertedPyramidStairsTerrainCfg",
     "HfSteppingStonesTerrainCfg",
     "HfHurdleTerrainCfg",

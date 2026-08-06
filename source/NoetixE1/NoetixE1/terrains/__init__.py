@@ -6,6 +6,7 @@ from isaaclab.terrains import *
 
 from .terrain_generator_cfg import *
 from .custom_terrain import (
+    HfContinuousWaveSlopesTerrainCfg,
     HfDoubleFramePlatformTerrainCfg,
     HfFigure8BridgeTerrainCfg,
     MeshFigure8BridgeTerrainCfg,
@@ -17,6 +18,7 @@ from .custom_terrain import (
     HfNoisyInvertedPyramidStairsTerrainCfg,
     HfNoisyPyramidSlopedTerrainCfg,
     HfNoisyPyramidStairsTerrainCfg,
+    HfThinObstaclesTerrainCfg,
     HfSteppingStonesTerrainCfg,
     HfFramePlatformTerrainCfg,
 )
