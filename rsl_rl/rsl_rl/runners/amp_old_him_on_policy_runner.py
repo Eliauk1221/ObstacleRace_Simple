@@ -130,6 +130,9 @@ class AmpOldHimOnPolicyRunner:
                     next_critic_obs = obs["critic"].clone().detach()
                     # Move to device
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    style_reward_gate = extras.get("high_speed_reward_gate")
+                    if style_reward_gate is not None:
+                        style_reward_gate = style_reward_gate.to(self.device)
                     # process termination obs
                     termination_ids = extras["terminal_observations"].get("env_ids")
                     termination_critic_obs = extras["terminal_observations"].get("critic")
@@ -151,6 +154,7 @@ class AmpOldHimOnPolicyRunner:
                         rewards,
                         self.amp_state_normalizer,
                         self.amp_style_reward_normalizer,
+                        style_reward_gate=style_reward_gate,
                     )
 
                     # process the step

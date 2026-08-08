@@ -9,7 +9,7 @@ import torch
 from isaaclab.assets.articulation import Articulation
 from isaaclab.envs.common import VecEnvStepReturn
 from isaaclab.envs.manager_based_rl_env import ManagerBasedRLEnv
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
 from NoetixE1.managers import MyObservationManager
 from NoetixE1.tasks.walkrun.noetix_e1.walkrun_amp_cfg import WalkRunFlatEnvCfg
 
@@ -257,6 +257,61 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
                 self.extras["log"][f"Terrain_Level_Mean/{terrain_type_name}"] = torch.mean(type_levels).item()
                 self.extras["log"][f"Terrain_Level_Max/{terrain_type_name}"] = torch.max(type_levels).item()
                 self.extras["log"][f"Terrain_Num_Envs/{terrain_type_name}"] = float(type_mask.sum().item())
+
+    def _compute_high_speed_statistics(self):
+        """Log terrain-specific command tracking for the explicit high-speed sampling mode."""
+        command_term = self.command_manager.get_term("base_velocity")
+        high_speed_ranges = getattr(command_term.cfg, "terrain_specific_high_speed_ranges", None)
+        high_speed_mask = getattr(command_term, "high_speed_mask", None)
+        if not high_speed_ranges or high_speed_mask is None:
+            return
+
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
+
+        command = command_term.command
+        gate_fn = getattr(command_term, "high_speed_reward_gate", None)
+        reward_gate = gate_fn() if gate_fn is not None else torch.ones(self.num_envs, device=self.device)
+        actual_velocity_yaw = quat_apply_inverse(
+            yaw_quat(self.robot.data.root_quat_w), self.robot.data.root_lin_vel_w
+        )
+        col_indices = self._current_terrain_col_indices
+        robot_positions_w = self.robot.data.root_pos_w
+
+        for terrain_type, ranges in high_speed_ranges.items():
+            type_mask = _check_terrain_types_from_positions(
+                self,
+                robot_positions_w,
+                (terrain_type,),
+                col_indices=col_indices,
+            )
+            selected = type_mask & high_speed_mask
+            effective = (
+                selected
+                & (command[:, 0] >= float(ranges.lin_vel_x[0]))
+                & (command[:, 0] <= float(ranges.lin_vel_x[1]))
+                & (torch.abs(command[:, 1]) <= 1e-6)
+            )
+
+            type_count = torch.clamp(type_mask.float().sum(), min=1.0)
+            selected_count = torch.clamp(selected.float().sum(), min=1.0)
+            selected_float = selected.float()
+            mean_command_x = torch.sum(command[:, 0] * selected_float) / selected_count
+            mean_actual_vx = torch.sum(actual_velocity_yaw[:, 0] * selected_float) / selected_count
+            mean_forward_deficit = torch.sum(
+                torch.clamp(command[:, 0] - actual_velocity_yaw[:, 0], min=0.0) * selected_float
+            ) / selected_count
+            mean_reward_gate = torch.sum(reward_gate * selected_float) / selected_count
+
+            self.extras["log"][f"Speed/High_Selected_Rate/{terrain_type}"] = (
+                selected.float().sum() / type_count
+            ).detach()
+            self.extras["log"][f"Speed/High_Effective_Rate/{terrain_type}"] = (
+                effective.float().sum() / type_count
+            ).detach()
+            self.extras["log"][f"Speed/Command_X/{terrain_type}/high"] = mean_command_x.detach()
+            self.extras["log"][f"Speed/Actual_Vx/{terrain_type}/high"] = mean_actual_vx.detach()
+            self.extras["log"][f"Speed/Forward_Deficit/{terrain_type}/high"] = mean_forward_deficit.detach()
+            self.extras["log"][f"Speed/Reward_Gate/{terrain_type}/high"] = mean_reward_gate.detach()
 
     def _build_col_to_terrain_type_map(self, terrain) -> dict[int, str] | None:
         """Build a mapping from column index to terrain type name.
@@ -517,6 +572,11 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
         self.reset_time_outs = self.termination_manager.time_outs
         # -- reward computation
         self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
+        command_term = self.command_manager.get_term("base_velocity")
+        gate_fn = getattr(command_term, "high_speed_reward_gate", None)
+        self.extras["high_speed_reward_gate"] = (
+            gate_fn().clone() if gate_fn is not None else torch.ones(self.num_envs, device=self.device)
+        )
 
         if len(self.recorder_manager.active_terms) > 0:
             # update observations for recording if needed
@@ -570,6 +630,7 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
 
         # -- Compute terrain statistics and add to extras["log"]
         self._compute_terrain_statistics()
+        self._compute_high_speed_statistics()
         # -- Compute terrain-specific termination statistics for current step
         if len(reset_env_ids) > 0:
             self._compute_terrain_termination_statistics(reset_env_ids)

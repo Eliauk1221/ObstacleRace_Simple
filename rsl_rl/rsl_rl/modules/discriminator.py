@@ -317,7 +317,14 @@ class Discriminator(nn.Module):
         disc_logit_loss = lambda_ * torch.sum(torch.square(logit_weights))
         return disc_logit_loss
 
-    def predict_amp_reward(self, state_buf, task_reward, state_normalizer=None, style_reward_normalizer=None):
+    def predict_amp_reward(
+        self,
+        state_buf,
+        task_reward,
+        state_normalizer=None,
+        style_reward_normalizer=None,
+        style_reward_gate=None,
+    ):
         with torch.no_grad():
             self.eval()
             # Avoid unnecessary clone when normalizer is not used
@@ -347,6 +354,13 @@ class Discriminator(nn.Module):
             else:
                 raise ValueError("Unexpected style reward mapping specified")
             style_reward *= (1.0 - self.reward_lerp) * self.reward_coef
+            if style_reward_gate is not None:
+                style_reward_gate = style_reward_gate.to(device=self.device, dtype=style_reward.dtype).reshape(-1, 1)
+                if style_reward_gate.shape != style_reward.shape:
+                    raise ValueError(
+                        f"Style reward gate shape {style_reward_gate.shape} does not match {style_reward.shape}."
+                    )
+                style_reward *= style_reward_gate
             task_reward = task_reward.unsqueeze(-1) * self.reward_lerp
             reward = style_reward + task_reward
             self.train()

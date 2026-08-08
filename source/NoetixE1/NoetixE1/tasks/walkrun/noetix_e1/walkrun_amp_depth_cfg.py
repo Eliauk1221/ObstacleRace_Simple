@@ -32,6 +32,8 @@ from . import mdp
 
 from NoetixE1.assets.robots.e1.e1 import E1_23DOF_CFG, E1_23DOF_ACTION_SCALE  # isort:skip
 
+E1_RUNNING_MOTION_FILE = f"{ASSET_DIR}/datasets/walkrun/e1/e1_running.txt"
+
 
 ##
 # Scene definition
@@ -211,6 +213,7 @@ class CommandsCfg:
         asset_name="robot",
         resampling_time_range=(5.0, 10.0),
         rel_standing_envs=0.1,
+        high_speed_reward_gate_floor=0.3,
         debug_vis=True,
         ranges=mdp.UniformVelocityWithZeroCommandCfg.Ranges(
             lin_vel_x=(-0.6, 1.5), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-1.0, 1.0), zero_prob=[0.4, 0.8, 0.4]
@@ -305,6 +308,50 @@ class CommandsCfg:
                 lin_vel_y=(0.0, 0.5),
                 ang_vel_z=(0, 0),
                 zero_prob=[0.5, 0.9, 0.5],
+            ),
+        },
+        terrain_specific_high_speed_ranges={
+            "plane": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(-1.0, 1.0),
+                zero_prob=[0.0, 1.0, 0.5],
+                probability=0.3,
+            ),
+            "rough_flat": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(-1.0, 1.0),
+                zero_prob=[0.0, 1.0, 0.5],
+                probability=0.3,
+            ),
+            "noisy_slope_up": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(-1.0, 1.0),
+                zero_prob=[0.0, 1.0, 0.5],
+                probability=0.3,
+            ),
+            "noisy_slope_down": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(-1.0, 1.0),
+                zero_prob=[0.0, 1.0, 0.5],
+                probability=0.3,
+            ),
+            "interlaced_corridor_wedges_smooth_entry_exit": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 2.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.0, 1.0, 1.0],
+                probability=0.3,
+            ),
+            "continuous_wave_slopes": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.0, 1.0, 1.0],
+                probability=0.3,
             ),
         },
         # TURN ABLATION: set probability to 0.0 to restore the original command distribution.
@@ -612,6 +659,12 @@ class EventCfg:
             },
             "joint_pos_range": (-0.2, 0.2),
             "joint_vel_range": (-1.0, 1.0),
+            "terrain_specific_rsi_excluded_motion_files": {
+                "stairs_up": [E1_RUNNING_MOTION_FILE],
+                "stairs_down": [E1_RUNNING_MOTION_FILE],
+                "discrete_obstacles": [E1_RUNNING_MOTION_FILE],
+                "thin_obstacles": [E1_RUNNING_MOTION_FILE],
+            },
             "terrain_specific_yaw": {
                 "cross_stepping_stones3": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
                 "cross_stepping_stones2": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
@@ -656,7 +709,7 @@ class EventCfg:
                 },
                 "interlaced_corridor_wedges_smooth_entry_exit": {
                     "x": (-4.0, -3.2),
-                    "y": (-0.9, -0.4),
+                    "y": (-0.75, -0.25),
                 },
                 "continuous_wave_slopes": {
                     "x": (-3.95, -3.85),
@@ -831,6 +884,7 @@ class RewardsCfg:
         weight=1.2,
         params={"std": 0.5, "skip_terrain_types": ("s_curve", "s_curve_reverse")},
     )
+    track_lin_vel_x_linear = RewTerm(func=mdp.track_lin_x_speed_linear, weight=1.5)
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_world_exp,
         weight=1.0,
@@ -843,12 +897,29 @@ class RewardsCfg:
                 "continuous_wave_slopes",
             ),
             "zero_terrain_types": ("s_curve", "s_curve_reverse"),
+            "gate_high_speed_positive": True,
         },
     )
     low_speed = RewTerm(
         func=mdp.low_speed_reward,
         weight=0.5,
-        params={"min_cmd_vel": 0.1, "skip_terrain_types": ("figure8_bridge",)},
+        params={
+            "min_cmd_vel": 0.1,
+            "skip_terrain_types": ("figure8_bridge",),
+            "skip_high_speed_commands": True,
+        },
+    )
+    high_speed_tracking_ratio = RewTerm(
+        func=mdp.high_speed_tracking_ratio_reward,
+        weight=1.0,
+        params={
+            "terrain_types": (
+                "plane", "rough_flat", "noisy_slope_up", "noisy_slope_down", "interlaced_corridor_wedges_smooth_entry_exit",
+                "continuous_wave_slopes",
+            ),
+            "command_name": "base_velocity",
+            "min_command_speed": 1.5,
+        },
     )
     delta_yaw = RewTerm(
         func=mdp.delta_yaw_reward_terrain_rescale,
@@ -1277,7 +1348,7 @@ class RewardsCfg:
             "std": 0.2,
             "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
             "min_forward_command": 0.3,
-            "local_x_range": (-2.8, 1.5),
+            "local_x_range": (-2.8, 3.0),
         },
     )
     smooth_entry_exit_corridor_world_x_progress_guidance = RewTerm(
@@ -1285,21 +1356,11 @@ class RewardsCfg:
         weight=0.5,
         params={
             "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "safe_half_width_m": 0.95,
-            "max_forward_speed": 1.5,
+            "safe_half_width_m": 0.85,
+            "max_forward_speed": 2.0,
+            "cap_by_command": True,
             "min_forward_command": 0.3,
             "local_x_range": (-4.2, -2.8),
-        },
-    )
-    smooth_entry_exit_corridor_world_x_progress_guidance_mid = RewTerm(
-        func=mdp.corridor_world_x_progress_reward,
-        weight=0.5,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "safe_half_width_m": 0.7,
-            "max_forward_speed": 1.5,
-            "min_forward_command": 0.3,
-            "local_x_range": (-2.8, -2.0),
         },
     )
     smooth_entry_exit_corridor_world_x_progress = RewTerm(
@@ -1307,36 +1368,11 @@ class RewardsCfg:
         weight=0.5,
         params={
             "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "safe_half_width_m": 0.5,
-            "max_forward_speed": 1.5,
+            "safe_half_width_m": 0.7,
+            "max_forward_speed": 2.0,
+            "cap_by_command": True,
             "min_forward_command": 0.3,
-            "local_x_range": (-2.0, 1.5),
-        },
-    )
-    smooth_entry_exit_corridor_exit_feedback_direction_progress = RewTerm(
-        func=mdp.corridor_feedback_direction_progress_reward,
-        weight=5.0,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "target_y": 1.0,
-            "lateral_gain": 1.8,
-            "max_lateral_slope": 1.0,
-            "max_alignment_error": 0.3490658503988659,  # 20 deg
-            "max_forward_speed": 1.5,
-            "min_forward_command": 0.3,
-            "local_x_range": (1.5, 3.2),
-        },
-    )
-    smooth_entry_exit_corridor_exit_funnel_shortfall = RewTerm(
-        func=mdp.corridor_smooth_funnel_shortfall_penalty,
-        weight=-2.0,
-        params={
-            "std": 0.3,
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "transition_x_range": (1.5, 2.8),
-            "minimum_y_range": (0.0, 0.75),
-            "min_forward_command": 0.3,
-            "local_x_range": (1.5, 3.2),
+            "local_x_range": (-2.8, 3.0),
         },
     )
     smooth_entry_exit_corridor_heading_threshold = RewTerm(
@@ -1368,37 +1404,15 @@ class RewardsCfg:
             "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
         },
     )
-    smooth_entry_exit_corridor_entry_lateral_threshold = RewTerm(
+    smooth_entry_exit_corridor_lateral_threshold = RewTerm(
         func=mdp.corridor_lateral_threshold_penalty,
         weight=-3.0,
         params={
             "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "penalty_threshold": 0.95,
+            "penalty_threshold": 0.85,
             "penalty_limit": 1.5,
             "min_forward_command": 0.3,
-            "local_x_range": (-4.2, -2.0),
-        },
-    )
-    smooth_entry_exit_corridor_center_lateral_threshold = RewTerm(
-        func=mdp.corridor_lateral_threshold_penalty,
-        weight=-3.0,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "penalty_threshold": 0.7,
-            "penalty_limit": 1.5,
-            "min_forward_command": 0.3,
-            "local_x_range": (-2.0, 1.5),
-        },
-    )
-    smooth_entry_exit_corridor_final_lateral_threshold = RewTerm(
-        func=mdp.corridor_lateral_threshold_penalty,
-        weight=-3.0,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "penalty_threshold": 1.3,
-            "penalty_limit": 1.5,
-            "min_forward_command": 0.3,
-            "local_x_range": (1.5, 3.0),
+            "local_x_range": (-4.2, 3.0),
         },
     )
     smooth_entry_exit_corridor_lateral_exit_penalty = RewTerm(
@@ -1426,7 +1440,8 @@ class RewardsCfg:
         params={
             "terrain_types": ("continuous_wave_slopes",),
             "safe_half_width_m": 1.15,
-            "max_forward_speed": 1.5,
+            "max_forward_speed": 3.0,
+            "cap_by_command": True,
             "min_forward_command": 0.3,
             "local_x_range": (-4.0, 3.70),
         },
@@ -1436,6 +1451,7 @@ class RewardsCfg:
         weight=-50.0,
         params={"term_name": "continuous_wave_slopes_lateral_exit"},
     )
+
     # ------------------------------------------------- Base --------------------------------------------------
     flat_orientation_exp = RewTerm(func=mdp.flat_orientation_exp, weight=0.5, params={"std": 0.5})
     # ------------------------------------------------- Feet --------------------------------------------------
@@ -1466,6 +1482,7 @@ class RewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "threshold": 0.3,
+            "gate_high_speed_positive": True,
         },
     )
     feet_unhold = RewTerm(
@@ -1901,12 +1918,14 @@ class WalkRunDepthEnvCfg(ManagerBasedRLEnvCfg):
         # ----------------------------------------------AMP----------------------------------------------
         self.motion_loader_name = "MotionLoaderE1"
         # self.motion_files = sorted(glob.glob(f"{ASSET_DIR}/datasets/walkrun/e1/*"))
-        self.motion_files = sorted([f"{ASSET_DIR}/datasets/walkrun/e1/e1_standing.txt",
-                                    f"{ASSET_DIR}/datasets/walkrun/e1/e1_sidewalk.txt",
-                                    f"{ASSET_DIR}/datasets/walkrun/e1/e1_walk_backward.txt",
-                                    f"{ASSET_DIR}/datasets/walkrun/e1/e1_turning.txt",
-                                    f"{ASSET_DIR}/datasets/walkrun/e1/e1_walk_forward.txt",
-                                    ])
+        self.motion_files = sorted([
+            f"{ASSET_DIR}/datasets/walkrun/e1/e1_standing.txt",
+            f"{ASSET_DIR}/datasets/walkrun/e1/e1_sidewalk.txt",
+            f"{ASSET_DIR}/datasets/walkrun/e1/e1_walk_backward.txt",
+            f"{ASSET_DIR}/datasets/walkrun/e1/e1_turning.txt",
+            f"{ASSET_DIR}/datasets/walkrun/e1/e1_walk_forward.txt",
+            E1_RUNNING_MOTION_FILE,
+        ])
         self.reference_observation_horizon = 4
         self.num_preload_transitions = 200000
         self.observations.discriminator.history_length = self.reference_observation_horizon

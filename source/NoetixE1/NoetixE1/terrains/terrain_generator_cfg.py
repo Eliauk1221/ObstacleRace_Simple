@@ -736,7 +736,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         #     pattern_origin_x_m=-3.0,
         #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         # ),
-        # 独立训练低侧平滑入口、内部中心线和低侧平滑出口。
+        # 保留地形名用于速度曲线对比；任务侧沿用 2026-07-24 坡前出生的稳定穿越设置。
         "interlaced_corridor_wedges_smooth_entry_exit": HfInterlacedCorridorWedgesTerrainCfg(
             proportion=0.3,
             corridor_half_width_m=1.5,

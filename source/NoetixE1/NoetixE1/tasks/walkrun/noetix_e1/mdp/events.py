@@ -21,6 +21,26 @@ if TYPE_CHECKING:
 _disturbance_state: dict[str, dict] = {}
 
 
+def _resolve_terrain_rsi_allowed_trajectory_indices(
+    motion_files: list[str],
+    terrain_specific_excluded_motion_files: dict[str, list[str]],
+) -> dict[str, tuple[int, ...]]:
+    """Resolve per-terrain RSI trajectory indices after applying file exclusions."""
+    all_indices = tuple(range(len(motion_files)))
+    allowed_by_terrain = {}
+    for terrain_type, excluded_paths in terrain_specific_excluded_motion_files.items():
+        missing_paths = [path for path in excluded_paths if path not in motion_files]
+        if missing_paths:
+            raise ValueError(f"Unknown RSI-excluded motion files for terrain '{terrain_type}': {missing_paths}")
+
+        excluded_indices = {motion_files.index(path) for path in excluded_paths}
+        allowed_indices = tuple(index for index in all_indices if index not in excluded_indices)
+        if not allowed_indices:
+            raise ValueError(f"RSI motion exclusion removed every trajectory for terrain '{terrain_type}'.")
+        allowed_by_terrain[terrain_type] = allowed_indices
+    return allowed_by_terrain
+
+
 def _terrain_env_mask(
     terrain_types_for_envs: torch.Tensor,
     col_indices: list[int],
@@ -217,6 +237,7 @@ def reset_root_state_amp(
     terrain_specific_yaw: dict[str, list[float] | tuple[float, float]] | None = None,
     terrain_specific_pos_range: dict[str, dict[str, tuple[float, float]]] | None = None,
     terrain_specific_motion_files: dict[str, list[str]] | None = None,
+    terrain_specific_rsi_excluded_motion_files: dict[str, list[str]] | None = None,
     terrain_specific_motion_level_range: tuple[int, int] | None = None,
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
     terrain_specific_spawn_z_offset: dict[str, float] | None = None,
@@ -349,9 +370,13 @@ def reset_root_state_amp(
         # get frames of amp motions (optionally from terrain-specific motion files)
         use_full_motion_state = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
         terrain_specific_motion_files = terrain_specific_motion_files or {}
+        terrain_specific_rsi_excluded_motion_files = terrain_specific_rsi_excluded_motion_files or {}
         motion_files_list = list(getattr(env.unwrapped.cfg, "motion_files", []) or [])
-        if terrain_specific_motion_files and motion_files_list:
-            from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
+        has_terrain_specific_rsi_sampling = bool(
+            terrain_specific_motion_files or terrain_specific_rsi_excluded_motion_files
+        )
+        if has_terrain_specific_rsi_sampling and motion_files_list:
+            from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
 
             terrain_to_indices = {}
             for terrain_type, paths in terrain_specific_motion_files.items():
@@ -365,6 +390,10 @@ def reset_root_state_amp(
                 if indices:
                     terrain_to_indices[terrain_type] = indices
 
+            terrain_to_rsi_allowed_indices = _resolve_terrain_rsi_allowed_trajectory_indices(
+                motion_files_list, terrain_specific_rsi_excluded_motion_files
+            )
+
             # 仅在指定地形等级范围内启用“指定地形用指定 motion”；None 表示全部等级启用
             if terrain_specific_motion_level_range is not None:
                 level_min, level_max = terrain_specific_motion_level_range
@@ -373,9 +402,8 @@ def reset_root_state_amp(
             else:
                 level_ok = torch.ones(len(env_ids), dtype=torch.bool, device=env.device)
 
-            env_id_str = str(id(env))
-            if env_id_str in _adaptive_terrain_state:
-                terrain_type_names_to_col_map = _adaptive_terrain_state[env_id_str]["terrain_type_names_to_col_map"]
+            terrain_type_names_to_col_map = get_terrain_type_names_to_col_map(env)
+            if terrain_type_names_to_col_map:
                 terrain_types_for_envs = env.scene.terrain.terrain_types[env_ids]
                 col_to_terrain_name = {}
                 for tname, cols in terrain_type_names_to_col_map.items():
@@ -392,31 +420,48 @@ def reset_root_state_amp(
                 frames = torch.empty(
                     (len(env_ids), frame_dim), device=env.device, dtype=env.motion_loader.preloaded_states.dtype
                 )
+                all_trajectory_indices = tuple(range(len(motion_files_list)))
                 for tname, local_indices in groups.items():
-                    allowed = terrain_to_indices.get(tname) if tname else None
-                    if allowed is not None and len(allowed) > 0:
-                        # 按等级范围拆分：在范围内的从指定 motion 采样并给满状态，否则从全部 motion 普通采样
+                    rsi_allowed = terrain_to_rsi_allowed_indices.get(tname, all_trajectory_indices)
+                    excluded = set(all_trajectory_indices) - set(rsi_allowed)
+
+                    full_state_allowed = terrain_to_indices.get(tname) if tname else None
+                    if full_state_allowed is not None:
+                        full_state_allowed = tuple(index for index in full_state_allowed if index not in excluded)
+                        if not full_state_allowed:
+                            raise ValueError(
+                                f"RSI motion exclusion removed every full-state trajectory for terrain '{tname}'."
+                            )
+
+                    if full_state_allowed is not None and len(full_state_allowed) > 0:
+                        # In-range samples use the full motion state; others keep the normal reset pose.
                         level_ok_sub = level_ok[local_indices]
                         in_range_where = torch.where(level_ok_sub)[0]
                         out_range_where = torch.where(~level_ok_sub)[0]
                         if in_range_where.numel() > 0:
                             batch_in = env.motion_loader.get_full_frame_batch(
-                                in_range_where.numel(), allowed_traj_idxs=allowed
+                                in_range_where.numel(), allowed_traj_idxs=full_state_allowed
                             )
                             for j, pos in enumerate(in_range_where):
                                 li = local_indices[pos.item()]
                                 frames[li] = batch_in[j]
                                 use_full_motion_state[li] = True
                         if out_range_where.numel() > 0:
-                            batch_out = env.motion_loader.get_full_frame_batch(out_range_where.numel())
+                            batch_out = env.motion_loader.get_full_frame_batch(
+                                out_range_where.numel(), allowed_traj_idxs=rsi_allowed
+                            )
                             for j, pos in enumerate(out_range_where):
                                 li = local_indices[pos.item()]
                                 frames[li] = batch_out[j]
                     else:
-                        batch = env.motion_loader.get_full_frame_batch(len(local_indices))
+                        batch = env.motion_loader.get_full_frame_batch(
+                            len(local_indices), allowed_traj_idxs=rsi_allowed
+                        )
                         for j, li in enumerate(local_indices):
                             frames[li] = batch[j]
             else:
+                if terrain_specific_rsi_excluded_motion_files:
+                    raise RuntimeError("Cannot apply terrain-specific RSI motion exclusions without terrain mapping.")
                 frames = env.motion_loader.get_full_frame_batch(len(env_ids))
         else:
             frames = env.motion_loader.get_full_frame_batch(len(env_ids))

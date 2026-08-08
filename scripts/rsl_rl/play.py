@@ -72,7 +72,7 @@ parser.add_argument(
         "Single-cell demo terrain: interlaced_corridor_wedges (首段中心出生), "
         "interlaced_corridor_wedges_approach (坡前低侧出生), "
         "interlaced_corridor_wedges_smooth_exit (坡前出生并平滑移向低侧出口), "
-        "interlaced_corridor_wedges_smooth_entry_exit (低侧平滑进入并从低侧退出), "
+        "interlaced_corridor_wedges_smooth_entry_exit (沿用 2026-07-24 坡前稳定穿越设置), "
         "continuous_wave_slopes (四段 1.5 m、15 度连续纵向斜坡), "
         "thin_obstacles (随机分布的窄障碍物), "
         "figure8_bridge (闭合 8 字桥, Trimesh), "
@@ -459,6 +459,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if base_velocity_cfg is None:
             print("[WARN] Keyboard control requested but base_velocity command not found in env config.")
         else:
+            # 仅覆盖 play 阶段的键盘指令范围
+            base_velocity_cfg.ranges.lin_vel_x = (0.0, 3.0)
+            base_velocity_cfg.ranges.lin_vel_y = (-0.5, 0.5)
+            base_velocity_cfg.ranges.ang_vel_z = (-1.0, 1.0)
+
             base_velocity_cfg.class_type = KeyboardVelocityCommand
             base_velocity_cfg.resampling_time_range = (1e9, 1e9)
 

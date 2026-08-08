@@ -29,6 +29,37 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
     return torch.sum(torch.square(joint_pos - target), dim=1)
 
 
+def track_lin_x_speed_linear(
+    env: ManagerBasedRLEnv,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    vel_yaw = math_utils.quat_apply_inverse(
+        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+    )
+
+    command = env.command_manager.get_command(command_name)
+    cmd_x = command[:, 0]
+    vel_x = vel_yaw[:, 0]
+    abs_cmd_x = torch.abs(cmd_x)
+    zero_cmd = abs_cmd_x < 0.1
+    rel_error = torch.abs(cmd_x - vel_x) / (abs_cmd_x + 1.0e-5)
+
+    reward = torch.clamp(1.0 - 2.0 * rel_error, min=-1.5, max=1.0)
+    reward = torch.where(cmd_x * vel_x < 0.0, reward - 1.0, reward)
+
+    aggressive_mask = abs_cmd_x > 2.5
+    undershoot = torch.abs(vel_x) < abs_cmd_x
+    undershoot_coef = torch.where(abs_cmd_x > 4.0, 1.0, 0.5)
+    undershoot_penalty = torch.where(undershoot, undershoot_coef * rel_error, 0.0)
+    reward = reward - undershoot_penalty * aggressive_mask.float()
+
+    command_weight = torch.clamp(abs_cmd_x / 1.5, min=0.2, max=1.0)
+    reward = reward * command_weight
+    return torch.where(zero_cmd, torch.zeros_like(reward), reward)
+
+
 def track_lin_vel_xy_yaw_frame_exp(
     env: ManagerBasedRLEnv,
     std: float,
@@ -94,6 +125,9 @@ def track_ang_vel_z_world_exp(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     skip_terrain_types: tuple[str, ...] | None = None,
     zero_terrain_types: tuple[str, ...] | None = None,
+    gate_high_speed_positive: bool = False,
+    high_speed_gate_floor: float | None = None,
+    command_name: str = "base_velocity",
 ) -> torch.Tensor:
     """Track yaw rate, with separate constant-one and zero masks for terrain-specific objectives."""
     asset: Articulation = env.scene[asset_cfg.name]
@@ -106,6 +140,8 @@ def track_ang_vel_z_world_exp(
     if zero_terrain_types:
         on_terrain = _terrain_type_mask(env, zero_terrain_types, reward.device)
         reward = torch.where(on_terrain, torch.zeros_like(reward), reward)
+    if gate_high_speed_positive:
+        reward = reward * _high_speed_positive_reward_gate(env, command_name, high_speed_gate_floor, reward.device)
     return reward
 
 
@@ -190,15 +226,29 @@ def turn_sequence_static_stability_reward(
 
 
 def flat_orientation_exp(
-    env: ManagerBasedRLEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    std: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    gate_high_speed_positive: bool = False,
+    high_speed_gate_floor: float | None = None,
+    command_name: str = "base_velocity",
 ) -> torch.Tensor:
     """Reward non-flat base orientation using exponential kernel."""
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.exp(-torch.norm(asset.data.projected_gravity_b[:, :2], dim=1) / std**2)
+    reward = torch.exp(-torch.norm(asset.data.projected_gravity_b[:, :2], dim=1) / std**2)
+    if gate_high_speed_positive:
+        reward = reward * _high_speed_positive_reward_gate(env, command_name, high_speed_gate_floor, reward.device)
+    return reward
 
 
-def feet_contact(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+def feet_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    gate_high_speed_positive: bool = False,
+    high_speed_gate_floor: float | None = None,
+    command_name: str = "base_velocity",
+) -> torch.Tensor:
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
     net_contact_forces = contact_sensor.data.net_forces_w_history
@@ -215,6 +265,8 @@ def feet_contact(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Te
         | (env.feet_both_contact_time < 0.2)
         | ((torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) < 0.1)
     ).float()
+    if gate_high_speed_positive:
+        reward = reward * _high_speed_positive_reward_gate(env, command_name, high_speed_gate_floor, reward.device)
     return reward
 
 
@@ -252,7 +304,14 @@ def feet_clearance(
     return torch.sum(height_error * foot_lateral_vel, dim=1) * torch.norm(command[:, :2], dim=1) > 1.5
 
 
-def feet_air_time_positive_biped(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+def feet_air_time_positive_biped(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    sensor_cfg: SceneEntityCfg,
+    gate_high_speed_positive: bool = False,
+    high_speed_gate_floor: float | None = None,
+    command_name: str = "base_velocity",
+) -> torch.Tensor:
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
     contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
@@ -264,6 +323,8 @@ def feet_air_time_positive_biped(env: ManagerBasedRLEnv, threshold: float, senso
     # no reward for zero command
     command = env.command_manager.get_command("base_velocity")
     reward *= (torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) > 0.1
+    if gate_high_speed_positive:
+        reward = reward * _high_speed_positive_reward_gate(env, command_name, high_speed_gate_floor, reward.device)
     return reward
 
 
@@ -493,17 +554,82 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     is_contact = torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold
     return torch.sum(is_contact, dim=1)
 
+
+def _high_speed_command_mask(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return the explicit high-speed mode selected by the command generator."""
+    command_term = env.command_manager.get_term(command_name)
+    high_speed_mask = getattr(command_term, "high_speed_mask", None)
+    if high_speed_mask is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=device)
+    return high_speed_mask.to(device=device, dtype=torch.bool)
+
+
+def _high_speed_positive_reward_gate(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    floor: float | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return the command term's high-speed gate, or identity for unsupported terms."""
+    command_term = env.command_manager.get_term(command_name)
+    gate_fn = getattr(command_term, "high_speed_reward_gate", None)
+    if gate_fn is None:
+        return torch.ones(env.num_envs, device=device)
+    return gate_fn(floor).to(device=device)
+
+
+def high_speed_tracking_ratio_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    command_name: str = "base_velocity",
+    min_command_speed: float = 0.1,
+    eps: float = 1e-6,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Provide a dense relative tracking signal only for selected high-speed commands."""
+    if min_command_speed < 0.0:
+        raise ValueError(f"min_command_speed must be non-negative, got {min_command_speed}.")
+    if eps <= 0.0:
+        raise ValueError(f"eps must be positive, got {eps}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    cmd_x = command[:, 0]
+    command_term = env.command_manager.get_term(command_name)
+    tracking_ratio_fn = getattr(command_term, "high_speed_tracking_ratio", None)
+    if tracking_ratio_fn is None:
+        vel_yaw = math_utils.quat_apply_inverse(
+            math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+        )
+        relative_error = torch.abs(vel_yaw[:, 0] - cmd_x) / torch.clamp(torch.abs(cmd_x), min=float(eps))
+        reward = torch.clamp(1.0 - relative_error, min=0.0, max=1.0)
+    else:
+        reward = tracking_ratio_fn(float(eps)).to(device=cmd_x.device)
+    active = (
+        _high_speed_command_mask(env, command_name, reward.device)
+        & _terrain_type_mask(env, terrain_types, reward.device)
+        & (cmd_x >= float(min_command_speed))
+    )
+    return reward * active.float()
+
+
 def low_speed_reward(
     env: ManagerBasedRLEnv,
     min_cmd_vel: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     skip_terrain_types: tuple[str, ...] | None = None,
+    skip_high_speed_commands: bool = False,
+    command_name: str = "base_velocity",
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
         math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
     )
-    command = env.command_manager.get_command("base_velocity")
+    command = env.command_manager.get_command(command_name)
     # Calculate the absolute value of speed and command for comparison
     absolute_speed = torch.abs(vel_yaw[:, 0])
     absolute_command = torch.abs(command[:, 0])
@@ -524,6 +650,9 @@ def low_speed_reward(
     if skip_terrain_types:
         on_skip = _terrain_type_mask(env, skip_terrain_types, reward.device)
         reward = reward * (~on_skip).float()
+    if skip_high_speed_commands:
+        high_speed_mask = _high_speed_command_mask(env, command_name, reward.device)
+        reward = reward * (~high_speed_mask).float()
     return reward
 
 
@@ -984,6 +1113,9 @@ def corridor_centerline_exp(
     min_forward_command: float = 0.3,
     local_x_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    gate_high_speed_positive: bool = False,
+    high_speed_gate_floor: float | None = None,
+    command_name: str = "base_velocity",
 ) -> torch.Tensor:
     """Reward staying near the corridor centerline (local y=0) on named terrains.
 
@@ -1012,7 +1144,10 @@ def corridor_centerline_exp(
         local_x = local_xy[:, 0]
         active = active & (local_x >= x_lo) & (local_x <= x_hi)
 
-    return reward * active.float()
+    reward = reward * active.float()
+    if gate_high_speed_positive:
+        reward = reward * _high_speed_positive_reward_gate(env, command_name, high_speed_gate_floor, reward.device)
+    return reward
 
 
 def _corridor_smooth_reference_geometry(
@@ -1223,6 +1358,7 @@ def corridor_feedback_direction_progress_reward(
     max_lateral_slope: float,
     max_alignment_error: float,
     max_forward_speed: float,
+    cap_by_command: bool = False,
     min_forward_command: float = 0.3,
     local_x_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -1261,10 +1397,13 @@ def corridor_feedback_direction_progress_reward(
         min=0.0,
         max=1.0,
     )
-    reward = torch.clamp(directional_speed, min=0.0, max=float(max_forward_speed)) * alignment_factor
-
     command = env.command_manager.get_command("base_velocity")
     cmd_x = command[:, 0] if command.dim() > 1 else command
+    reward_speed_cap = torch.full_like(cmd_x, float(max_forward_speed))
+    if cap_by_command:
+        reward_speed_cap = torch.minimum(reward_speed_cap, torch.clamp(cmd_x, min=0.0))
+    reward = torch.minimum(torch.clamp(directional_speed, min=0.0), reward_speed_cap) * alignment_factor
+
     active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
     if local_x_range is not None:
         x_lo, x_hi = local_x_range
@@ -1280,6 +1419,7 @@ def corridor_world_x_progress_reward(
     terrain_types: tuple[str, ...],
     safe_half_width_m: float,
     max_forward_speed: float,
+    cap_by_command: bool = False,
     min_forward_command: float = 0.3,
     local_x_range: tuple[float, float] | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -1308,7 +1448,10 @@ def corridor_world_x_progress_reward(
         x_lo, x_hi = local_x_range
         active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
 
-    forward_speed = asset.data.root_lin_vel_w[:, 0].clamp(min=0.0, max=float(max_forward_speed))
+    reward_speed_cap = torch.full_like(cmd_x, float(max_forward_speed))
+    if cap_by_command:
+        reward_speed_cap = torch.minimum(reward_speed_cap, torch.clamp(cmd_x, min=0.0))
+    forward_speed = torch.minimum(asset.data.root_lin_vel_w[:, 0].clamp(min=0.0), reward_speed_cap)
     return forward_speed * active.float()
 
 

@@ -53,6 +53,35 @@ class UniformVelocityWithZeroCommand(CommandTerm):
         self.is_zero_vel_x_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.is_zero_vel_y_env = torch.zeros_like(self.is_zero_vel_x_env)
         self.is_zero_vel_yaw_env = torch.zeros_like(self.is_zero_vel_x_env)
+        self.is_high_speed_env = torch.zeros_like(self.is_zero_vel_x_env)
+
+        if self.cfg.terrain_specific_high_speed_ranges:
+            for terrain_type, high_speed_ranges in self.cfg.terrain_specific_high_speed_ranges.items():
+                if not 0.0 <= float(high_speed_ranges.probability) <= 1.0:
+                    raise ValueError(
+                        f"Invalid high-speed probability for {terrain_type}: {high_speed_ranges.probability}"
+                    )
+                for component_name, limits in (
+                    ("lin_vel_x", high_speed_ranges.lin_vel_x),
+                    ("lin_vel_y", high_speed_ranges.lin_vel_y),
+                    ("ang_vel_z", high_speed_ranges.ang_vel_z),
+                ):
+                    if float(limits[0]) > float(limits[1]):
+                        raise ValueError(
+                            f"Invalid high-speed {component_name} range for {terrain_type}: {limits}"
+                        )
+                if float(high_speed_ranges.lin_vel_x[0]) <= 0.0:
+                    raise ValueError(
+                        f"High-speed lin_vel_x must stay positive for {terrain_type}: "
+                        f"{high_speed_ranges.lin_vel_x}"
+                    )
+                if len(high_speed_ranges.zero_prob) != 3 or any(
+                    not 0.0 <= float(probability) <= 1.0 for probability in high_speed_ranges.zero_prob
+                ):
+                    raise ValueError(
+                        f"Invalid high-speed zero probabilities for {terrain_type}: "
+                        f"{high_speed_ranges.zero_prob}"
+                    )
 
     def __str__(self) -> str:
         """Return a string representation of the command generator."""
@@ -71,6 +100,34 @@ class UniformVelocityWithZeroCommand(CommandTerm):
         """The desired base velocity command in the base frame. Shape is (num_envs, 3)."""
         return self.vel_command_b
 
+    @property
+    def high_speed_mask(self) -> torch.Tensor:
+        """Mask of environments using a terrain-specific high-speed command."""
+        return self.is_high_speed_env
+
+    def high_speed_tracking_ratio(self, eps: float = 1e-6) -> torch.Tensor:
+        """Return normalized forward-speed tracking quality in ``[0, 1]``."""
+        if eps <= 0.0:
+            raise ValueError(f"eps must be positive, got {eps}.")
+        velocity_yaw = math_utils.quat_apply_inverse(
+            math_utils.yaw_quat(self.robot.data.root_quat_w), self.robot.data.root_lin_vel_w[:, :3]
+        )
+        cmd_x = self.vel_command_b[:, 0]
+        relative_error = torch.abs(velocity_yaw[:, 0] - cmd_x) / torch.clamp(
+            torch.abs(cmd_x), min=float(eps)
+        )
+        return torch.clamp(1.0 - relative_error, min=0.0, max=1.0)
+
+    def high_speed_reward_gate(self, floor: float | None = None) -> torch.Tensor:
+        """Scale selected high-speed rewards while leaving normal commands unchanged."""
+        if floor is None:
+            floor = self.cfg.high_speed_reward_gate_floor
+        if not 0.0 <= float(floor) <= 1.0:
+            raise ValueError(f"High-speed reward gate floor must be in [0, 1], got {floor}.")
+        tracking_ratio = self.high_speed_tracking_ratio()
+        high_speed_gate = float(floor) + (1.0 - float(floor)) * tracking_ratio
+        return torch.where(self.is_high_speed_env, high_speed_gate, torch.ones_like(high_speed_gate))
+
     """
     Implementation specific functions.
     """
@@ -88,22 +145,28 @@ class UniformVelocityWithZeroCommand(CommandTerm):
         )
 
     def _resample_command(self, env_ids):
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        num_resampled_envs = env_ids.numel()
+
         # sample velocity commands
-        r = torch.empty(len(env_ids), device=self.device)
+        r = torch.empty(num_resampled_envs, device=self.device)
         
         # Initialize velocity commands and zero probabilities with default values
-        vel_x = torch.zeros(len(env_ids), device=self.device)
-        vel_y = torch.zeros(len(env_ids), device=self.device)
-        vel_yaw = torch.zeros(len(env_ids), device=self.device)
-        zero_prob_x = torch.full((len(env_ids),), self.cfg.ranges.zero_prob[0], device=self.device)
-        zero_prob_y = torch.full((len(env_ids),), self.cfg.ranges.zero_prob[1], device=self.device)
-        zero_prob_yaw = torch.full((len(env_ids),), self.cfg.ranges.zero_prob[2], device=self.device)
+        vel_x = torch.zeros(num_resampled_envs, device=self.device)
+        vel_y = torch.zeros(num_resampled_envs, device=self.device)
+        vel_yaw = torch.zeros(num_resampled_envs, device=self.device)
+        zero_prob_x = torch.full((num_resampled_envs,), self.cfg.ranges.zero_prob[0], device=self.device)
+        zero_prob_y = torch.full((num_resampled_envs,), self.cfg.ranges.zero_prob[1], device=self.device)
+        zero_prob_yaw = torch.full((num_resampled_envs,), self.cfg.ranges.zero_prob[2], device=self.device)
         
         # Track which environments have been processed with terrain-specific ranges
-        processed_mask = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+        processed_mask = torch.zeros(num_resampled_envs, dtype=torch.bool, device=self.device)
+        selected_high_speed = torch.zeros_like(processed_mask)
         
         # Get terrain types for environments if terrain-specific ranges are configured
-        if self.cfg.terrain_specific_ranges is not None and len(self.cfg.terrain_specific_ranges) > 0:
+        has_terrain_specific_ranges = bool(self.cfg.terrain_specific_ranges)
+        has_high_speed_ranges = bool(self.cfg.terrain_specific_high_speed_ranges)
+        if has_terrain_specific_ranges or has_high_speed_ranges:
             from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _check_terrain_types_from_positions
             
             # Use cached col_indices from step function if available, otherwise compute from positions
@@ -117,35 +180,32 @@ class UniformVelocityWithZeroCommand(CommandTerm):
                 asset = self._env.scene[self.cfg.asset_name]
                 robot_positions_w = asset.data.root_pos_w[env_ids]  # (len(env_ids), 3)
             
-            # Process each terrain type with specific ranges
-            for terrain_type, terrain_ranges in self.cfg.terrain_specific_ranges.items():
+            def terrain_mask(terrain_type: str) -> torch.Tensor:
                 # Check if robots are on this terrain type (batch processing)
                 if col_indices_subset is not None:
                     # Use cached col_indices
-                    is_this_terrain = _check_terrain_types_from_positions(
+                    return _check_terrain_types_from_positions(
                         self._env, None, (terrain_type,), col_indices=col_indices_subset
                     )
-                else:
-                    # Fallback: compute from positions
-                    is_this_terrain = _check_terrain_types_from_positions(
-                        self._env, robot_positions_w, (terrain_type,)
-                    )
-                
-                if is_this_terrain.any():
-                    num_matching_envs = is_this_terrain.sum().item()
-                    
-                    # Sample velocities for this terrain type
-                    r_terrain = torch.empty(num_matching_envs, device=self.device)
-                    vel_x[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.lin_vel_x)
-                    vel_y[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.lin_vel_y)
-                    vel_yaw[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.ang_vel_z)
-                    
-                    # Set zero probabilities for this terrain type
-                    zero_prob_x[is_this_terrain] = terrain_ranges.zero_prob[0]
-                    zero_prob_y[is_this_terrain] = terrain_ranges.zero_prob[1]
-                    zero_prob_yaw[is_this_terrain] = terrain_ranges.zero_prob[2]
-                    
-                    processed_mask = processed_mask | is_this_terrain
+                # Fallback: compute from positions
+                return _check_terrain_types_from_positions(
+                    self._env, robot_positions_w, (terrain_type,)
+                )
+
+            # Process each terrain type with specific normal ranges.
+            if self.cfg.terrain_specific_ranges:
+                for terrain_type, terrain_ranges in self.cfg.terrain_specific_ranges.items():
+                    is_this_terrain = terrain_mask(terrain_type)
+                    if is_this_terrain.any():
+                        num_matching_envs = is_this_terrain.sum().item()
+                        r_terrain = torch.empty(num_matching_envs, device=self.device)
+                        vel_x[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.lin_vel_x)
+                        vel_y[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.lin_vel_y)
+                        vel_yaw[is_this_terrain] = r_terrain.uniform_(*terrain_ranges.ang_vel_z)
+                        zero_prob_x[is_this_terrain] = terrain_ranges.zero_prob[0]
+                        zero_prob_y[is_this_terrain] = terrain_ranges.zero_prob[1]
+                        zero_prob_yaw[is_this_terrain] = terrain_ranges.zero_prob[2]
+                        processed_mask |= is_this_terrain
         
         # Fill remaining environments with default ranges
         not_processed = ~processed_mask
@@ -154,6 +214,26 @@ class UniformVelocityWithZeroCommand(CommandTerm):
             vel_x[not_processed] = r_default.uniform_(*self.cfg.ranges.lin_vel_x)
             vel_y[not_processed] = r_default.uniform_(*self.cfg.ranges.lin_vel_y)
             vel_yaw[not_processed] = r_default.uniform_(*self.cfg.ranges.ang_vel_z)
+
+        # Replace a fixed fraction of eligible terrain commands with an independent high-speed sample.
+        if self.cfg.terrain_specific_high_speed_ranges:
+            for terrain_type, high_speed_ranges in self.cfg.terrain_specific_high_speed_ranges.items():
+                is_this_terrain = terrain_mask(terrain_type)
+                selected = is_this_terrain & (
+                    torch.rand(num_resampled_envs, device=self.device) < float(high_speed_ranges.probability)
+                )
+                if not selected.any():
+                    continue
+
+                num_selected = selected.sum().item()
+                r_high = torch.empty(num_selected, device=self.device)
+                vel_x[selected] = r_high.uniform_(*high_speed_ranges.lin_vel_x)
+                vel_y[selected] = r_high.uniform_(*high_speed_ranges.lin_vel_y)
+                vel_yaw[selected] = r_high.uniform_(*high_speed_ranges.ang_vel_z)
+                zero_prob_x[selected] = high_speed_ranges.zero_prob[0]
+                zero_prob_y[selected] = high_speed_ranges.zero_prob[1]
+                zero_prob_yaw[selected] = high_speed_ranges.zero_prob[2]
+                selected_high_speed |= selected
         
         # Set velocity commands
         self.vel_command_b[env_ids, 0] = vel_x
@@ -167,6 +247,10 @@ class UniformVelocityWithZeroCommand(CommandTerm):
 
         # update standing envs
         self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
+        self.is_high_speed_env[env_ids] = selected_high_speed
+        high_speed_env_ids = env_ids[selected_high_speed]
+        self.is_zero_vel_x_env[high_speed_env_ids] = False
+        self.is_standing_env[high_speed_env_ids] = False
 
     def _update_command(self):
         """Sets velocity command to zero for standing envs."""
@@ -294,6 +378,7 @@ class TurnSequenceVelocityCommand(UniformVelocityWithZeroCommand):
             return
         self.is_turn_sequence_env[turn_env_ids] = True
         self.is_turn_sequence_turning[turn_env_ids] = True
+        self.is_high_speed_env[turn_env_ids] = False
         self.turn_sequence_time_left[turn_env_ids] = self._sample_phase_duration(
             turn_env_ids, self.cfg.turn_duration_range
         )
@@ -419,6 +504,25 @@ class UniformVelocityWithZeroCommandCfg(CommandTermCfg):
         The tuple contains the probability of zero linear-x, linear-y, and angular-z velocity.
         """
 
+    @configclass
+    class HighSpeedRanges:
+        """Terrain-specific static high-speed command distribution."""
+
+        lin_vel_x: tuple[float, float] = MISSING
+        """Positive linear-x range for high-speed commands (in m/s)."""
+
+        lin_vel_y: tuple[float, float] = MISSING
+        """Linear-y range for high-speed commands (in m/s)."""
+
+        ang_vel_z: tuple[float, float] = MISSING
+        """Angular-z range for high-speed commands (in rad/s)."""
+
+        zero_prob: tuple[float, float, float] = MISSING
+        """Zero probabilities for x, y, and yaw in high-speed mode."""
+
+        probability: float = 0.0
+        """Fixed probability of selecting high-speed mode at each command resample."""
+
     ranges: Ranges = MISSING
     """Distribution ranges for the velocity commands."""
 
@@ -429,6 +533,12 @@ class UniformVelocityWithZeroCommandCfg(CommandTermCfg):
     Example: {"cross_stepping_stones": Ranges(lin_vel_x=(0.0, 1.0), ...)}
     If None, uses the default ranges for all terrains.
     """
+
+    terrain_specific_high_speed_ranges: dict[str, HighSpeedRanges] | None = None
+    """Optional static high-speed distributions keyed by terrain type."""
+
+    high_speed_reward_gate_floor: float = 0.3
+    """Minimum positive-reward scale selected in high-speed mode."""
 
     goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/velocity_goal"
