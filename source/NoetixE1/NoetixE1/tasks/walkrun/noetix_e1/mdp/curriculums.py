@@ -598,7 +598,11 @@ def terrain_levels_vel_with_termination(
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
     continuous_wave_terrain_types: tuple[str, ...] | list[str] = (),
-    continuous_wave_success_term: str = "continuous_wave_slopes_reach_end",
+    continuous_wave_finish_x_m: float = 3.8,
+    symmetric_slope_terrain_types: tuple[str, ...] | list[str] = (),
+    symmetric_slope_finish_x_m: float = 1.7,
+    braking_slope_terrain_types: tuple[str, ...] | list[str] = (),
+    braking_slope_finish_x_m: float = 1.5,
 ) -> torch.Tensor:
     """Curriculum based on the distance the robot walked when commanded to move at a desired velocity.
 
@@ -610,16 +614,21 @@ def terrain_levels_vel_with_termination(
     - 弧长由 ``figure8_bridge_path_progress_reward`` 写入 ``env.figure8_episode_arc_m``
 
     **interlaced corridor approach / smooth-exit / smooth-entry-exit variants**
-    - move_up：到达对应完成线且未横向越界
-    - move_down：有前进指令却停在入口前，或在坡面范围内横向越界
+    - move_up：episode 结束时 root 到达对应完成线
+    - move_down：有前进指令却停在入口前
 
     **continuous wave slopes**
-    - move_up：双脚越过配置的终点线
-    - move_down：episode 未以该精确成功项结束
+    - move_up：episode 结束时 root local x 到达终点线
+    - move_down：episode 结束时 root local x 未到达终点线
+    - 越过终点线不会触发 termination，地形等级只在后续 reset 时更新
+
+    **continuous wave / symmetric / braking slopes**
+    - move_up: episode-end root local x reaches the terrain-specific finish line
+    - move_down: episode-end root local x remains before that finish line
 
     **其它地形**
     - 有前进速度指令：原距离课程
-    - 无前进速度指令：超时不变档；仅 ``fall_down_in_some_terrain`` 降档（不含姿态类终止）
+    - 无前进速度指令：保留距离升档判断，不再依赖已禁用的地形专用终止项降档
 
     .. note::
         It is only possible to use this term with the terrain type ``generator``. For further information
@@ -699,7 +708,20 @@ def terrain_levels_vel_with_termination(
     is_continuous_wave = _env_ids_on_terrain_types(
         env, env_ids_tensor, continuous_wave_terrain_types
     )
-    other_terrain = ~(is_figure8 | is_interlaced_approach | is_s_curve | is_continuous_wave)
+    is_symmetric_slope = _env_ids_on_terrain_types(
+        env, env_ids_tensor, symmetric_slope_terrain_types
+    )
+    is_braking_slope = _env_ids_on_terrain_types(
+        env, env_ids_tensor, braking_slope_terrain_types
+    )
+    other_terrain = ~(
+        is_figure8
+        | is_interlaced_approach
+        | is_s_curve
+        | is_continuous_wave
+        | is_symmetric_slope
+        | is_braking_slope
+    )
 
     # 8 字桥：沿中心线走过半圈（pi*r_c）升档；掉桥降档
     if is_figure8.any():
@@ -747,23 +769,43 @@ def terrain_levels_vel_with_termination(
         )
         reached_corridor_end = local_x >= completion_x
         stayed_before_entry = local_x <= -3.0
-        lateral_exit = (
-            env.termination_manager.get_term("approach_corridor_lateral_exit")[approach_env_ids]
-            | env.termination_manager.get_term("smooth_exit_corridor_lateral_exit")[approach_env_ids]
-            | env.termination_manager.get_term("smooth_entry_exit_corridor_lateral_exit")[approach_env_ids]
-        )
-        move_up[approach_local] = reached_corridor_end & ~lateral_exit
+        move_up[approach_local] = reached_corridor_end
         move_down[approach_local] = (
-            lateral_exit
-            | (stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end)
+            stayed_before_entry & has_forward_velocity[approach_local] & ~reached_corridor_end
         )
 
     if is_continuous_wave.any():
         wave_local = torch.where(is_continuous_wave)[0]
         wave_env_ids = env_ids_tensor[wave_local]
-        reached_end = env.termination_manager.get_term(continuous_wave_success_term)[wave_env_ids]
+        local_x = (
+            asset.data.root_pos_w[wave_env_ids, 0]
+            - env.scene.env_origins[wave_env_ids, 0]
+        )
+        reached_end = local_x >= float(continuous_wave_finish_x_m)
         move_up[wave_local] = reached_end
         move_down[wave_local] = ~reached_end
+
+    if is_symmetric_slope.any():
+        symmetric_local = torch.where(is_symmetric_slope)[0]
+        symmetric_env_ids = env_ids_tensor[symmetric_local]
+        local_x = (
+            asset.data.root_pos_w[symmetric_env_ids, 0]
+            - env.scene.env_origins[symmetric_env_ids, 0]
+        )
+        reached_end = local_x >= float(symmetric_slope_finish_x_m)
+        move_up[symmetric_local] = reached_end
+        move_down[symmetric_local] = ~reached_end
+
+    if is_braking_slope.any():
+        braking_local = torch.where(is_braking_slope)[0]
+        braking_env_ids = env_ids_tensor[braking_local]
+        local_x = (
+            asset.data.root_pos_w[braking_env_ids, 0]
+            - env.scene.env_origins[braking_env_ids, 0]
+        )
+        reached_end = local_x >= float(braking_slope_finish_x_m)
+        move_up[braking_local] = reached_end
+        move_down[braking_local] = ~reached_end
 
     # 其它地形：保留原距离 / 速度课程
     if other_terrain.any():
@@ -780,10 +822,6 @@ def terrain_levels_vel_with_termination(
         if no_vel_mask.any():
             sub = nf_local[torch.where(no_vel_mask)[0]]
             move_up[sub] = distance[sub] > terrain_gen_cfg.size[0] / 2
-            sub_env_ids = env_ids_tensor[sub]
-            fell_down = env.termination_manager.get_term("fall_down_in_some_terrain")[sub_env_ids]
-            move_down[sub] = fell_down
-            move_down[sub] *= ~move_up[sub]
 
     # S 弯到达终点才升档；未过半程即失败则降档，过半后失败保持等级。
     if is_s_curve.any():

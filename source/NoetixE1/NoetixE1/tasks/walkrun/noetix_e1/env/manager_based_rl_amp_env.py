@@ -545,10 +545,16 @@ class ManagerBasedRLAmpEnv(ManagerBasedRLEnv, gym.Env):
             (self.num_envs,), -1, device=self.device, dtype=torch.int8
         )
         up_mask = _check_terrain_types_from_positions(
-            self, None, ("stairs_up",), col_indices=self._current_terrain_col_indices
+            self,
+            None,
+            ("stairs_up", "spiral_stairs_up"),
+            col_indices=self._current_terrain_col_indices,
         )
         down_mask = _check_terrain_types_from_positions(
-            self, None, ("stairs_down",), col_indices=self._current_terrain_col_indices
+            self,
+            None,
+            ("stairs_down", "spiral_stairs_down"),
+            col_indices=self._current_terrain_col_indices,
         )
         stair_direction[up_mask] = 0
         stair_direction[down_mask] = 1

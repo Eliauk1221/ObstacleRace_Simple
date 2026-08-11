@@ -63,7 +63,14 @@ parser.add_argument(
         "interlaced_corridor_wedges_smooth_exit",
         "interlaced_corridor_wedges_smooth_entry_exit",
         "continuous_wave_slopes",
+        "symmetric_slope",
+        "braking_slope",
         "thin_obstacles",
+        "pillar_flat",
+        "stairs_up",
+        "stairs_down",
+        "spiral_stairs_up",
+        "spiral_stairs_down",
         "figure8_bridge",
         "s_curve",
         "s_curve_reverse",
@@ -74,7 +81,12 @@ parser.add_argument(
         "interlaced_corridor_wedges_smooth_exit (坡前出生并平滑移向低侧出口), "
         "interlaced_corridor_wedges_smooth_entry_exit (沿用 2026-07-24 坡前稳定穿越设置), "
         "continuous_wave_slopes (四段 1.5 m、15 度连续纵向斜坡), "
+        "symmetric_slope (3 m x 3.5 m、20 度对称 V 形斜坡), "
+        "braking_slope (四级上台阶直连 30 度下坡), "
         "thin_obstacles (随机分布的窄障碍物), "
+        "pillar_flat (随机分布的高柱), "
+        "stairs_up / stairs_down (带四条对角实体护板的上下台阶), "
+        "spiral_stairs_up / spiral_stairs_down (相邻高度层旋转 4.5 度的螺旋上下台阶), "
         "figure8_bridge (闭合 8 字桥, Trimesh), "
         "s_curve / s_curve_reverse (正向/镜像 S 弯, Trimesh). "
         "Empty string disables."
@@ -409,6 +421,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )
                 }
+            elif st == "symmetric_slope":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshSymmetricSlopeTerrainCfg(
+                        proportion=1.0,
+                        obstacle_length_m=3.0,
+                        obstacle_width_m=3.5,
+                        slope_angle_deg=20.0,
+                        gap_width_by_level=(0.12, 0.115, 0.11, 0.105, 0.10, 0.10, 0.095, 0.09, 0.085, 0.08),
+                        finish_flat_length_m=0.2,
+                        ground_thickness_m=0.1,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "braking_slope":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshBrakingSlopeTerrainCfg(
+                        proportion=1.0,
+                        walkable_width_m=2.0,
+                        num_steps=4,
+                        slope_angle_deg=30.0,
+                        slope_foot_x_m=1.1,
+                        finish_flat_length_m=0.4,
+                        success_region_length_m=0.2,
+                        ground_thickness_m=0.1,
+                        step_height_by_level=(
+                            0.14, 0.1425, 0.145, 0.1475, 0.15,
+                            0.15, 0.1525, 0.155, 0.1575, 0.16,
+                        ),
+                        tread_depth_by_level=(
+                            0.32, 0.315, 0.31, 0.305, 0.30,
+                            0.30, 0.295, 0.29, 0.285, 0.28,
+                        ),
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
             elif st == "thin_obstacles":
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
                     st: terrain_gen.HfThinObstaclesTerrainCfg(
@@ -419,6 +466,68 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         num_obstacles=30,
                         platform_width=1.0,
                         boundary_margin=0.5,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "pillar_flat":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshFlatPillarsTerrainCfg(
+                        proportion=1.0,
+                        pillar_width_range=(0.1, 0.2),
+                        pillar_thickness_range=(0.1, 0.2),
+                        pillar_height_range=(1.0, 1.5),
+                        num_pillars_range=(4, 8),
+                        platform_width=2.0,
+                        boundary_margin=0.5,
+                        min_pillar_spacing=0.3,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st in ("stairs_up", "stairs_down"):
+                stair_cfg_type = (
+                    terrain_gen.HfNoisyInvertedPyramidStairsTerrainCfg
+                    if st == "stairs_up"
+                    else terrain_gen.HfNoisyPyramidStairsTerrainCfg
+                )
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: stair_cfg_type(
+                        proportion=1.0,
+                        step_height_range=(0.05, 0.25),
+                        step_width_pixels_range=(10, 5),
+                        platform_width=2.0,
+                        border_width=0.5,
+                        noise_range=(0.0, 0.0),
+                        noise_step=0.02,
+                        railing_tile_probability=1.0,
+                        railing_side_probability=1.0,
+                        ensure_one_railing=True,
+                        railing_thickness=0.1,
+                        railing_top_clearance_range=(0.2, 0.5),
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st in ("spiral_stairs_up", "spiral_stairs_down"):
+                spiral_stair_cfg_type = (
+                    terrain_gen.MeshSpiralInvertedPyramidStairsTerrainCfg
+                    if st == "spiral_stairs_up"
+                    else terrain_gen.MeshSpiralPyramidStairsTerrainCfg
+                )
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: spiral_stair_cfg_type(
+                        proportion=1.0,
+                        step_height_range=(0.05, 0.25),
+                        num_steps=7,
+                        center_tread_depth=0.33,
+                        usable_tread_width=2.0,
+                        platform_width=2.0,
+                        border_width=0.5,
+                        rotation_per_step_deg=4.5,
+                        ground_thickness=0.1,
+                        railing_tile_probability=1.0,
+                        railing_side_probability=1.0,
+                        ensure_one_railing=True,
+                        railing_thickness=0.1,
+                        railing_top_clearance=0.3,
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )
                 }

@@ -1150,6 +1150,88 @@ def corridor_centerline_exp(
     return reward
 
 
+def corridor_centerline_deviation_penalty(
+    env: ManagerBasedRLEnv,
+    std: float,
+    terrain_types: tuple[str, ...],
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Return zero on the centerline and smoothly increasing lateral deviation away from it."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    penalty = 1.0 - torch.exp(-torch.square(local_xy[:, 1]) / float(std) ** 2)
+    command = env.command_manager.get_command(command_name)
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        active &= (local_xy[:, 0] >= x_lo) & (local_xy[:, 0] <= x_hi)
+    return penalty * active.float()
+
+
+def corridor_support_foot_lateral_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    penalty_threshold: float,
+    penalty_limit: float,
+    contact_force_threshold: float = 0.5,
+    min_forward_command: float = 0.3,
+    local_x_range: tuple[float, float] | None = None,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    ),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "contact_sensor", body_names=".*_ankle_roll_link"
+    ),
+) -> torch.Tensor:
+    """Penalize support-foot contacts that approach a corridor's lateral terrain edge."""
+    if penalty_threshold < 0.0:
+        raise ValueError(f"penalty_threshold must be non-negative, got {penalty_threshold}.")
+    if penalty_limit <= penalty_threshold:
+        raise ValueError(
+            f"penalty_limit must exceed penalty_threshold, got {penalty_limit} <= {penalty_threshold}."
+        )
+    if contact_force_threshold < 0.0:
+        raise ValueError(
+            f"contact_force_threshold must be non-negative, got {contact_force_threshold}."
+        )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_root_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    foot_y = (
+        asset.data.body_pos_w[:, asset_cfg.body_ids, 1]
+        - env.scene.env_origins[:, 1].unsqueeze(1)
+    )
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(
+            torch.norm(contact_forces[:, :, contact_sensor_cfg.body_ids, :], dim=-1), dim=1
+        )[0]
+        > float(contact_force_threshold)
+    )
+    normalized_excess = (
+        (torch.abs(foot_y) - float(penalty_threshold))
+        / float(penalty_limit - penalty_threshold)
+    ).clamp(min=0.0, max=1.0)
+    penalty = torch.max(torch.square(normalized_excess) * feet_contact.float(), dim=1)[0]
+
+    command = env.command_manager.get_command(command_name)
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (cmd_x > min_forward_command)
+    if local_x_range is not None:
+        x_lo, x_hi = local_x_range
+        active &= (local_root_xy[:, 0] >= x_lo) & (local_root_xy[:, 0] <= x_hi)
+    return penalty * active.float()
+
+
 def _corridor_smooth_reference_geometry(
     local_x: torch.Tensor,
     transition_x_range: tuple[float, float],
@@ -1452,6 +1534,90 @@ def corridor_world_x_progress_reward(
     if cap_by_command:
         reward_speed_cap = torch.minimum(reward_speed_cap, torch.clamp(cmd_x, min=0.0))
     forward_speed = torch.minimum(asset.data.root_lin_vel_w[:, 0].clamp(min=0.0), reward_speed_cap)
+    return forward_speed * active.float()
+
+
+def _braking_slope_x_bounds(
+    env: ManagerBasedRLEnv,
+    terrain_type: str,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return per-environment stair-start, slope-top, and slope-foot local x coordinates."""
+    terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+    cfg = terrain_gen_cfg.sub_terrains.get(terrain_type)
+    if cfg is None:
+        raise ValueError(f"Missing terrain configuration for {terrain_type!r}.")
+
+    step_heights = torch.as_tensor(cfg.step_height_by_level, dtype=torch.float, device=device)
+    tread_depths = torch.as_tensor(cfg.tread_depth_by_level, dtype=torch.float, device=device)
+    if step_heights.numel() == 0 or step_heights.shape != tread_depths.shape:
+        raise ValueError("braking-slope step-height and tread-depth schedules must match.")
+
+    num_rows = int(getattr(terrain_gen_cfg, "num_rows", 1))
+    if num_rows > 1:
+        level_indices = torch.round(
+            env.scene.terrain.terrain_levels.to(device=device, dtype=torch.float)
+            .clamp(0, num_rows - 1)
+            / float(num_rows - 1)
+            * (step_heights.numel() - 1)
+        ).long()
+    else:
+        difficulty_range = getattr(terrain_gen_cfg, "difficulty_range", (0.0, 0.0))
+        difficulty = max(0.0, min(float(difficulty_range[0]), 1.0))
+        level = min(int(math.floor(difficulty * step_heights.numel())), step_heights.numel() - 1)
+        level_indices = torch.full((env.num_envs,), level, dtype=torch.long, device=device)
+    stairs_height = float(cfg.num_steps) * step_heights[level_indices]
+    slope_horizontal_length = stairs_height / math.tan(
+        math.radians(float(cfg.slope_angle_deg))
+    )
+    slope_foot_x = torch.full_like(stairs_height, float(cfg.slope_foot_x_m))
+    slope_top_x = slope_foot_x - slope_horizontal_length
+    stairs_start_x = slope_top_x - float(cfg.num_steps) * tread_depths[level_indices]
+    return stairs_start_x, slope_top_x, slope_foot_x
+
+
+def braking_slope_world_x_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    section: str,
+    safe_half_width_m: float,
+    max_forward_speed: float,
+    cap_by_command: bool = True,
+    min_forward_command: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward world-frame +x progress on the level-specific stair or down-slope section."""
+    if len(terrain_types) != 1:
+        raise ValueError("braking_slope progress expects exactly one terrain type.")
+    if section not in ("stairs", "slope"):
+        raise ValueError(f"section must be 'stairs' or 'slope', got {section!r}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    terrain_mask = _terrain_type_mask(env, terrain_types, asset.device)
+    if not terrain_mask.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    stairs_start_x, slope_top_x, slope_foot_x = _braking_slope_x_bounds(
+        env, terrain_types[0], asset.device
+    )
+    x_min, x_max = (
+        (stairs_start_x, slope_top_x) if section == "stairs" else (slope_top_x, slope_foot_x)
+    )
+
+    command = env.command_manager.get_command("base_velocity")
+    cmd_x = command[:, 0] if command.dim() > 1 else command
+    active = (
+        terrain_mask
+        & (cmd_x > float(min_forward_command))
+        & (local_xy[:, 0] >= x_min)
+        & (local_xy[:, 0] <= x_max)
+        & (torch.abs(local_xy[:, 1]) <= float(safe_half_width_m))
+    )
+    speed_cap = torch.full_like(cmd_x, float(max_forward_speed))
+    if cap_by_command:
+        speed_cap = torch.minimum(speed_cap, torch.clamp(cmd_x, min=0.0))
+    forward_speed = torch.minimum(asset.data.root_lin_vel_w[:, 0].clamp(min=0.0), speed_cap)
     return forward_speed * active.float()
 
 

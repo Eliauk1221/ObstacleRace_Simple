@@ -490,34 +490,11 @@ def _continuous_wave_on_terrain_mask(
     return _check_terrain_types_from_positions(env, None, terrain_types, col_indices=col_indices)
 
 
-def continuous_wave_slopes_reach_end_timeout(
-    env: ManagerBasedRLEnv,
-    terrain_types: tuple[str, ...] | list[str] = ("continuous_wave_slopes",),
-    finish_x_m: float = 3.70,
-    max_abs_foot_y_m: float = 1.20,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-    ),
-) -> torch.Tensor:
-    """Succeed once both feet cross the finish line while remaining over the terrain."""
-    if max_abs_foot_y_m <= 0.0:
-        raise ValueError(f"max_abs_foot_y_m must be positive, got {max_abs_foot_y_m}.")
-
-    asset: Articulation = env.scene[asset_cfg.name]
-    on_terrain = _continuous_wave_on_terrain_mask(env, terrain_types, asset)
-    origins_xy = env.scene.env_origins[:, :2].unsqueeze(1)
-    foot_xy = asset.data.body_pos_w[:, asset_cfg.body_ids, :2] - origins_xy
-    both_crossed = (foot_xy[..., 0] >= float(finish_x_m)).all(dim=1)
-    both_inside = (torch.abs(foot_xy[..., 1]) <= float(max_abs_foot_y_m)).all(dim=1)
-    return on_terrain & both_crossed & both_inside
-
-
 def continuous_wave_slopes_lateral_exit(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...] | list[str] = ("continuous_wave_slopes",),
-    finish_x_m: float = 3.70,
-    max_abs_root_y_m: float = 1.20,
-    max_abs_contact_y_m: float = 1.25,
+    max_abs_root_y_m: float = 1.00,
+    max_abs_contact_y_m: float = 1.20,
     contact_force_threshold: float = 0.5,
     asset_cfg: SceneEntityCfg = SceneEntityCfg(
         "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
@@ -550,20 +527,12 @@ def continuous_wave_slopes_lateral_exit(
         feet_contact & (torch.abs(foot_xy[..., 1]) > float(max_abs_contact_y_m))
     ).any(dim=1)
     root_outside = torch.abs(local_root_xy[:, 1]) > float(max_abs_root_y_m)
-
-    # The finish-line timeout owns a simultaneous boundary event.
-    success = (
-        (foot_xy[..., 0] >= float(finish_x_m)).all(dim=1)
-        & (torch.abs(foot_xy[..., 1]) <= float(max_abs_root_y_m)).all(dim=1)
-    )
-    return on_terrain & (root_outside | support_contact_outside) & ~success
+    return on_terrain & (root_outside | support_contact_outside)
 
 
 def continuous_wave_slopes_forbidden_contact(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...] | list[str] = ("continuous_wave_slopes",),
-    finish_x_m: float = 3.70,
-    max_abs_foot_y_m: float = 1.20,
     threshold: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg(
         "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
@@ -573,46 +542,14 @@ def continuous_wave_slopes_forbidden_contact(
         body_names=[r"^(?!l_leg_ankle_roll_link$)(?!r_leg_ankle_roll_link$).+$"],
     ),
 ) -> torch.Tensor:
-    """Fail when a non-foot robot body contacts the terrain before success."""
+    """Fail when a non-foot robot body contacts the terrain."""
     asset: Articulation = env.scene[asset_cfg.name]
     on_terrain = _continuous_wave_on_terrain_mask(env, terrain_types, asset)
-    foot_xy = (
-        asset.data.body_pos_w[:, asset_cfg.body_ids, :2]
-        - env.scene.env_origins[:, :2].unsqueeze(1)
-    )
-    success = (
-        (foot_xy[..., 0] >= float(finish_x_m)).all(dim=1)
-        & (torch.abs(foot_xy[..., 1]) <= float(max_abs_foot_y_m)).all(dim=1)
-    )
 
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
     illegal_contact = torch.max(torch.norm(contact_forces, dim=-1), dim=1)[0] > float(threshold)
-    return on_terrain & illegal_contact.any(dim=1) & ~success
-
-
-def bad_orientation_with_continuous_wave_success_precedence(
-    env: ManagerBasedRLEnv,
-    limit_angle: float,
-    continuous_wave_terrain_types: tuple[str, ...] | list[str] = ("continuous_wave_slopes",),
-    finish_x_m: float = 3.70,
-    max_abs_foot_y_m: float = 1.20,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    feet_asset_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-    ),
-) -> torch.Tensor:
-    """Apply the normal orientation failure while giving finish-line success precedence."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    bad_orientation = torch.acos(-asset.data.projected_gravity_b[:, 2]).abs() > float(limit_angle)
-    wave_success = continuous_wave_slopes_reach_end_timeout(
-        env,
-        terrain_types=continuous_wave_terrain_types,
-        finish_x_m=finish_x_m,
-        max_abs_foot_y_m=max_abs_foot_y_m,
-        asset_cfg=feet_asset_cfg,
-    )
-    return bad_orientation & ~wave_success
+    return on_terrain & illegal_contact.any(dim=1)
 
 
 def terrain_out_of_bounds(

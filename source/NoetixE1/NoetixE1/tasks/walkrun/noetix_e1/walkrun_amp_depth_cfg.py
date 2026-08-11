@@ -291,6 +291,18 @@ class CommandsCfg:
                 ang_vel_z=(0.0, 0.0),
                 zero_prob=[0.1, 0.9, 0.5],
             ),
+            "symmetric_slope": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.3, 1.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.1, 0.9, 0.5],
+            ),
+            "braking_slope": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
+                lin_vel_x=(0.0, 1.5),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.1, 0.9, 0.5],
+            ),
             "s_curve": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
                 lin_vel_x=(0.8, 2.0),
                 lin_vel_y=(0.0, 0.0),
@@ -347,6 +359,13 @@ class CommandsCfg:
                 probability=0.3,
             ),
             "continuous_wave_slopes": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
+                lin_vel_x=(1.5, 3.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                zero_prob=[0.0, 1.0, 1.0],
+                probability=0.3,
+            ),
+            "symmetric_slope": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
                 lin_vel_x=(1.5, 3.0),
                 lin_vel_y=(0.0, 0.0),
                 ang_vel_z=(0.0, 0.0),
@@ -661,9 +680,13 @@ class EventCfg:
             "joint_vel_range": (-1.0, 1.0),
             "terrain_specific_rsi_excluded_motion_files": {
                 "stairs_up": [E1_RUNNING_MOTION_FILE],
+                "spiral_stairs_up": [E1_RUNNING_MOTION_FILE],
                 "stairs_down": [E1_RUNNING_MOTION_FILE],
+                "spiral_stairs_down": [E1_RUNNING_MOTION_FILE],
                 "discrete_obstacles": [E1_RUNNING_MOTION_FILE],
                 "thin_obstacles": [E1_RUNNING_MOTION_FILE],
+                "pillar_flat": [E1_RUNNING_MOTION_FILE],
+                "braking_slope": [E1_RUNNING_MOTION_FILE],
             },
             "terrain_specific_yaw": {
                 "cross_stepping_stones3": [0.0, 1.57, 3.14, -1.57],  # 0°, 90°, 180°, -90°
@@ -675,6 +698,8 @@ class EventCfg:
                 "interlaced_corridor_wedges_smooth_exit": (-0.2617993877991494, 0.2617993877991494),
                 "interlaced_corridor_wedges_smooth_entry_exit": (-0.2617993877991494, 0.2617993877991494),
                 "continuous_wave_slopes": (-0.2617993877991494, 0.2617993877991494),
+                "symmetric_slope": (-0.17453292519943295, 0.17453292519943295),  # +/- 10 deg
+                "braking_slope": (-0.17453292519943295, 0.17453292519943295),  # +/- 10 deg
                 "s_curve": (2.9, 3.4),
                 "s_curve_reverse": (-0.2, 0.2),
             },
@@ -714,6 +739,14 @@ class EventCfg:
                 "continuous_wave_slopes": {
                     "x": (-3.95, -3.85),
                     "y": (-0.60, 0.60),
+                },
+                "symmetric_slope": {
+                    "x": (-1.85, -1.65),
+                    "y": (-0.2, 0.2),
+                },
+                "braking_slope": {
+                    "x": (-1.6, -1.4),
+                    "y": (-0.2, 0.2),
                 },
                 "s_curve": {
                     "x": (0.9, 1.2),
@@ -878,6 +911,8 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
+    alive = RewTerm(func=mdp.is_alive, weight=0.2)
+
     # ------------------------------------------- Tracking Velocity -------------------------------------------
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
@@ -895,6 +930,7 @@ class RewardsCfg:
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
                 "continuous_wave_slopes",
+                "symmetric_slope"
             ),
             "zero_terrain_types": ("s_curve", "s_curve_reverse"),
             "gate_high_speed_positive": True,
@@ -915,7 +951,7 @@ class RewardsCfg:
         params={
             "terrain_types": (
                 "plane", "rough_flat", "noisy_slope_up", "noisy_slope_down", "interlaced_corridor_wedges_smooth_entry_exit",
-                "continuous_wave_slopes",
+                "continuous_wave_slopes", "symmetric_slope", "braking_slope"
             ),
             "command_name": "base_velocity",
             "min_command_speed": 1.5,
@@ -929,7 +965,7 @@ class RewardsCfg:
                 "figure8_bridge", "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
-                "continuous_wave_slopes",
+                "continuous_wave_slopes", "symmetric_slope", "braking_slope",
                 "s_curve", "s_curve_reverse",
             ),
             "scale_on_terrain": 0.0,
@@ -1217,11 +1253,11 @@ class RewardsCfg:
             "local_x_range": (-4.2, 3.0),
         },
     )
-    approach_corridor_lateral_exit_penalty = RewTerm(
-        func=mdp.termination_term_indicator,
-        weight=-50.0,  # With step_dt=0.02, the terminal-step contribution is -1.0.
-        params={"term_name": "approach_corridor_lateral_exit"},
-    )
+    # approach_corridor_lateral_exit_penalty = RewTerm(
+    #     func=mdp.termination_term_indicator,
+    #     weight=-50.0,  # With step_dt=0.02, the terminal-step contribution is -1.0.
+    #     params={"term_name": "approach_corridor_lateral_exit"},
+    # )
 
     # ------------------------------ interlaced_corridor_wedges_smooth_exit ------------------------------
 
@@ -1333,11 +1369,11 @@ class RewardsCfg:
             "local_x_range": (1.5, 3.0),
         },
     )
-    smooth_exit_corridor_lateral_exit_penalty = RewTerm(
-        func=mdp.termination_term_indicator,
-        weight=-50.0,
-        params={"term_name": "smooth_exit_corridor_lateral_exit"},
-    )
+    # smooth_exit_corridor_lateral_exit_penalty = RewTerm(
+    #     func=mdp.termination_term_indicator,
+    #     weight=-50.0,
+    #     params={"term_name": "smooth_exit_corridor_lateral_exit"},
+    # )
 
     # --------------------------- interlaced_corridor_wedges_smooth_entry_exit ---------------------------
 
@@ -1415,41 +1451,128 @@ class RewardsCfg:
             "local_x_range": (-4.2, 3.0),
         },
     )
-    smooth_entry_exit_corridor_lateral_exit_penalty = RewTerm(
-        func=mdp.termination_term_indicator,
-        weight=-50.0,
-        params={"term_name": "smooth_entry_exit_corridor_lateral_exit"},
-    )
+    # smooth_entry_exit_corridor_lateral_exit_penalty = RewTerm(
+    #     func=mdp.termination_term_indicator,
+    #     weight=-50.0,
+    #     params={"term_name": "smooth_entry_exit_corridor_lateral_exit"},
+    # )
 
     # ------------------------------ continuous_wave_slopes ------------------------------
-    continuous_wave_heading_threshold = RewTerm(
-        func=mdp.corridor_heading_threshold_penalty,
-        weight=-2.0,
-        params={
-            "terrain_types": ("continuous_wave_slopes",),
-            "penalty_threshold": 0.08726646259971647,  # 5 deg
-            "penalty_limit": 0.3490658503988659,  # 20 deg
-            "target_heading": 0.0,
-            "min_forward_command": 0.3,
-            "local_x_range": (-4.0, -2.25),
-        },
-    )
     continuous_wave_world_x_progress = RewTerm(
         func=mdp.corridor_world_x_progress_reward,
         weight=0.5,
         params={
             "terrain_types": ("continuous_wave_slopes",),
-            "safe_half_width_m": 1.15,
+            "safe_half_width_m": 0.60,
             "max_forward_speed": 3.0,
             "cap_by_command": True,
             "min_forward_command": 0.3,
-            "local_x_range": (-4.0, 3.70),
+            "local_x_range": (-4.0, 3.8),
         },
     )
-    continuous_wave_lateral_exit_penalty = RewTerm(
-        func=mdp.termination_term_indicator,
-        weight=-50.0,
-        params={"term_name": "continuous_wave_slopes_lateral_exit"},
+    continuous_wave_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=2.0,
+        params={
+            "std": 0.3,
+            "terrain_types": ("continuous_wave_slopes",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, 3.8),
+        },
+    )
+    continuous_wave_outer_lateral = RewTerm(
+        func=mdp.corridor_lateral_threshold_penalty,
+        weight=-3.0,
+        params={
+            "terrain_types": ("continuous_wave_slopes",),
+            "penalty_threshold": 0.60,
+            "penalty_limit": 1.2,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, 3.8),
+        },
+    )
+    continuous_wave_support_foot_edge = RewTerm(
+        func=mdp.corridor_support_foot_lateral_penalty,
+        weight=-1.0,
+        params={
+            "terrain_types": ("continuous_wave_slopes",),
+            "penalty_threshold": 1.00,
+            "penalty_limit": 1.20,
+            "contact_force_threshold": 0.5,
+            "min_forward_command": 0.3,
+            "local_x_range": (-4.0, 3.8),
+            "asset_cfg": SceneEntityCfg(
+                "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+            ),
+            "contact_sensor_cfg": SceneEntityCfg(
+                "contact_sensor", body_names=".*_ankle_roll_link"
+            ),
+        },
+    )
+    # continuous_wave_lateral_exit_penalty = RewTerm(
+    #     func=mdp.termination_term_indicator,
+    #     weight=-50.0,
+    #     params={"term_name": "continuous_wave_slopes_lateral_exit"},
+    # )
+
+    # ------------------------------ symmetric_slope ------------------------------
+    symmetric_slope_world_x_progress = RewTerm(
+        func=mdp.corridor_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("symmetric_slope",),
+            "safe_half_width_m": 0.6,
+            "max_forward_speed": 3.0,
+            "cap_by_command": True,
+            "min_forward_command": 0.3,
+            "local_x_range": (-1.85, 1.7),
+        },
+    )
+    symmetric_slope_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=2.0,
+        params={
+            "std": 0.3,
+            "terrain_types": ("symmetric_slope",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-1.85, 1.7),
+        },
+    )
+
+    # ------------------------------ braking_slope ------------------------------
+    braking_slope_stairs_world_x_progress = RewTerm(
+        func=mdp.braking_slope_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("braking_slope",),
+            "section": "stairs",
+            "safe_half_width_m": 0.6,
+            "max_forward_speed": 1.5,
+            "cap_by_command": True,
+            "min_forward_command": 0.0,
+        },
+    )
+    braking_slope_downhill_world_x_progress = RewTerm(
+        func=mdp.braking_slope_world_x_progress_reward,
+        weight=0.5,
+        params={
+            "terrain_types": ("braking_slope",),
+            "section": "slope",
+            "safe_half_width_m": 0.6,
+            "max_forward_speed": 1.5,
+            "cap_by_command": True,
+            "min_forward_command": 0.0,
+        },
+    )
+    braking_slope_centerline = RewTerm(
+        func=mdp.corridor_centerline_exp,
+        weight=2.0,
+        params={
+            "std": 0.3,
+            "terrain_types": ("braking_slope",),
+            "min_forward_command": 0.3,
+            "local_x_range": (-1.6, 1.5),
+        },
     )
 
     # ------------------------------------------------- Base --------------------------------------------------
@@ -1493,13 +1616,13 @@ class RewardsCfg:
             "left_foot_height_scanner_cfg": SceneEntityCfg("left_foot_height_scanner"),
             "right_foot_height_scanner_cfg": SceneEntityCfg("right_foot_height_scanner"),
             "terrain_types": (
-                "stairs_up", "stairs_down",
-                "gap", "discrete_obstacles", "thin_obstacles", "hurdle",
+                "stairs_up", "stairs_down", "spiral_stairs_up", "spiral_stairs_down",
+                "gap", "discrete_obstacles", "thin_obstacles", "pillar_flat", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
-                "continuous_wave_slopes",
+                "continuous_wave_slopes", "symmetric_slope", "braking_slope",
             ),
         },
     )
@@ -1513,8 +1636,13 @@ class RewardsCfg:
             "support_height_tolerance": 0.03,
             "reward_sigma": 0.25,
             "curriculum_level_threshold": 3,
-            "terrain_types": ("stairs_up", "stairs_down"),
-            "downstairs_terrain_types": ("stairs_down",),
+            "terrain_types": (
+                "stairs_up",
+                "stairs_down",
+                "spiral_stairs_up",
+                "spiral_stairs_down",
+            ),
+            "downstairs_terrain_types": ("stairs_down", "spiral_stairs_down"),
             "downstairs_scale": 1.5,
         },
     )
@@ -1525,14 +1653,14 @@ class RewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("leg_volume_points"),
             "terrain_types": (
-                "stairs_up", "stairs_down",
-                "gap", "discrete_obstacles", "thin_obstacles", "hurdle",
+                "stairs_up", "stairs_down", "spiral_stairs_up", "spiral_stairs_down",
+                "gap", "discrete_obstacles", "thin_obstacles", "pillar_flat", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
                 "s_curve", "s_curve_reverse",
-                "continuous_wave_slopes",
+                "continuous_wave_slopes", "symmetric_slope", "braking_slope"
             ),
         },
     )
@@ -1586,8 +1714,8 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
             "terrain_types": (
-                "stairs_up", "stairs_down",
-                "gap", "discrete_obstacles", "thin_obstacles", "hurdle",
+                "stairs_up", "stairs_down", "spiral_stairs_up", "spiral_stairs_down",
+                "gap", "discrete_obstacles", "thin_obstacles", "pillar_flat", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
                 "s_curve", "s_curve_reverse",
             ),
@@ -1692,156 +1820,145 @@ class TerminationsCfg:
     # (2) Fall Down （Do not use in terrain）
     # fall_down = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.5})
     # (3) Bad Orientation
-    bad_orientation = DoneTerm(
-        func=mdp.bad_orientation_with_continuous_wave_success_precedence,
-        params={
-            "limit_angle": 0.707,
-            "continuous_wave_terrain_types": ("continuous_wave_slopes",),
-            "finish_x_m": 3.70,
-            "max_abs_foot_y_m": 1.20,
-            "feet_asset_cfg": SceneEntityCfg(
-                "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-            ),
-        },
-    )  # 45deg
+    bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 0.707})
     # (4) Fall Down in some terrain
-    fall_down_in_some_terrain = DoneTerm(
-        func=mdp.fall_down_in_some_terrain,
-        params={
-            "minimum_height": 0.5,
-            "terrain_types": [
-                "cross_stepping_stones3",
-                "cross_stepping_stones2",
-                "cross_stepping_stones1",
-                "stepping_stones",
-                "beam",
-                "gap",
-            ]
-        }
-    )
-    figure8_bridge_fall_off = DoneTerm(
-        func=mdp.figure8_bridge_fall_off,
-        params={
-            "terrain_types": ["figure8_bridge"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "root_drop_threshold_m": 0.06,
-            # Allow a small outer margin and the vertical center transition used by the mesh.
-            "annulus_outer_margin_m": 0.08,
-            "transition_y_extend_m": 0.12,
-            "transition_x_margin_m": 0.06,
-        },
-    )
-    s_curve_reach_end = DoneTerm(
-        func=mdp.s_curve_reach_end_timeout,
-        time_out=True,
-        params={
-            "terrain_types": ["s_curve"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
-            "end_region_xy_range": (-0.5, -2.5, 2.6, 3.8),
-        },
-    )
-    s_curve_invalid_contact = DoneTerm(
-        func=mdp.s_curve_invalid_contact,
-        params={
-            "terrain_types": ["s_curve"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
-            "end_region_xy_range": (0.0, -2.0, 2.6, 3.8),
-        },
-    )
-    s_curve_reverse_reach_end = DoneTerm(
-        func=mdp.s_curve_reach_end_timeout,
-        time_out=True,
-        params={
-            "terrain_types": ["s_curve_reverse"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
-            "end_region_xy_range": (0.5, 2.5, 2.6, 3.8),
-        },
-    )
-    s_curve_reverse_invalid_contact = DoneTerm(
-        func=mdp.s_curve_invalid_contact,
-        params={
-            "terrain_types": ["s_curve_reverse"],
-            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "contact_force_threshold": 0.5,
-            "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
-            "end_region_xy_range": (0.0, 2.0, 2.6, 3.8),
-        },
-    )
-    approach_corridor_lateral_exit = DoneTerm(
-        func=mdp.interlaced_corridor_lateral_exit,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_approach",),
-            "local_x_range": (-4.2, 3.0),
-            "max_abs_local_y": 1.55,  # 1.5 m half-width plus the 0.06 m edge fade.
-        },
-    )
-    smooth_exit_corridor_lateral_exit = DoneTerm(
-        func=mdp.interlaced_corridor_lateral_exit,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_exit",),
-            "local_x_range": (-4.2, 3.0),
-            "max_abs_local_y": 1.55,
-        },
-    )
-    smooth_entry_exit_corridor_lateral_exit = DoneTerm(
-        func=mdp.interlaced_corridor_lateral_exit,
-        params={
-            "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
-            "local_x_range": (-4.2, 3.0),
-            "max_abs_local_y": 1.55,
-        },
-    )
-    continuous_wave_slopes_reach_end = DoneTerm(
-        func=mdp.continuous_wave_slopes_reach_end_timeout,
-        time_out=True,
-        params={
-            "terrain_types": ("continuous_wave_slopes",),
-            "finish_x_m": 3.70,
-            "max_abs_foot_y_m": 1.20,
-            "asset_cfg": SceneEntityCfg(
-                "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-            ),
-        },
-    )
-    continuous_wave_slopes_lateral_exit = DoneTerm(
-        func=mdp.continuous_wave_slopes_lateral_exit,
-        params={
-            "terrain_types": ("continuous_wave_slopes",),
-            "finish_x_m": 3.70,
-            "max_abs_root_y_m": 1.20,
-            "max_abs_contact_y_m": 1.25,
-            "contact_force_threshold": 0.5,
-            "asset_cfg": SceneEntityCfg(
-                "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-            ),
-            "contact_sensor_cfg": SceneEntityCfg(
-                "contact_sensor", body_names=".*_ankle_roll_link"
-            ),
-        },
-    )
-    continuous_wave_slopes_forbidden_contact = DoneTerm(
-        func=mdp.continuous_wave_slopes_forbidden_contact,
-        params={
-            "terrain_types": ("continuous_wave_slopes",),
-            "finish_x_m": 3.70,
-            "max_abs_foot_y_m": 1.20,
-            "threshold": 1.0,
-            "asset_cfg": SceneEntityCfg(
-                "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
-            ),
-            "sensor_cfg": SceneEntityCfg(
-                "contact_sensor",
-                body_names=[r"^(?!l_leg_ankle_roll_link$)(?!r_leg_ankle_roll_link$).+$"],
-            ),
-        },
-    )
+    # fall_down_in_some_terrain = DoneTerm(
+    #     func=mdp.fall_down_in_some_terrain,
+    #     params={
+    #         "minimum_height": 0.5,
+    #         "terrain_types": [
+    #             "cross_stepping_stones3",
+    #             "cross_stepping_stones2",
+    #             "cross_stepping_stones1",
+    #             "stepping_stones",
+    #             "beam",
+    #             "gap",
+    #         ]
+    #     }
+    # )
+    # figure8_bridge_fall_off = DoneTerm(
+    #     func=mdp.figure8_bridge_fall_off,
+    #     params={
+    #         "terrain_types": ["figure8_bridge"],
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "contact_force_threshold": 0.5,
+    #         "root_drop_threshold_m": 0.06,
+    #         # Allow a small outer margin and the vertical center transition used by the mesh.
+    #         "annulus_outer_margin_m": 0.08,
+    #         "transition_y_extend_m": 0.12,
+    #         "transition_x_margin_m": 0.06,
+    #     },
+    # )
+    # s_curve_reach_end = DoneTerm(
+    #     func=mdp.s_curve_reach_end_timeout,
+    #     time_out=True,
+    #     params={
+    #         "terrain_types": ["s_curve"],
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "contact_force_threshold": 0.5,
+    #         "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
+    #         "end_region_xy_range": (-0.5, -2.5, 2.6, 3.8),
+    #     },
+    # )
+    # s_curve_invalid_contact = DoneTerm(
+    #     func=mdp.s_curve_invalid_contact,
+    #     params={
+    #         "terrain_types": ["s_curve"],
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "contact_force_threshold": 0.5,
+    #         "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
+    #         "end_region_xy_range": (0.0, -2.0, 2.6, 3.8),
+    #     },
+    # )
+    # s_curve_reverse_reach_end = DoneTerm(
+    #     func=mdp.s_curve_reach_end_timeout,
+    #     time_out=True,
+    #     params={
+    #         "terrain_types": ["s_curve_reverse"],
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "contact_force_threshold": 0.5,
+    #         "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
+    #         "end_region_xy_range": (0.5, 2.5, 2.6, 3.8),
+    #     },
+    # )
+    # s_curve_reverse_invalid_contact = DoneTerm(
+    #     func=mdp.s_curve_invalid_contact,
+    #     params={
+    #         "terrain_types": ["s_curve_reverse"],
+    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+    #         "contact_force_threshold": 0.5,
+    #         "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
+    #         "end_region_xy_range": (0.0, 2.0, 2.6, 3.8),
+    #     },
+    # )
+    # approach_corridor_lateral_exit = DoneTerm(
+    #     func=mdp.interlaced_corridor_lateral_exit,
+    #     params={
+    #         "terrain_types": ("interlaced_corridor_wedges_approach",),
+    #         "local_x_range": (-4.2, 3.0),
+    #         "max_abs_local_y": 1.55,  # 1.5 m half-width plus the 0.06 m edge fade.
+    #     },
+    # )
+    # smooth_exit_corridor_lateral_exit = DoneTerm(
+    #     func=mdp.interlaced_corridor_lateral_exit,
+    #     params={
+    #         "terrain_types": ("interlaced_corridor_wedges_smooth_exit",),
+    #         "local_x_range": (-4.2, 3.0),
+    #         "max_abs_local_y": 1.55,
+    #     },
+    # )
+    # smooth_entry_exit_corridor_lateral_exit = DoneTerm(
+    #     func=mdp.interlaced_corridor_lateral_exit,
+    #     params={
+    #         "terrain_types": ("interlaced_corridor_wedges_smooth_entry_exit",),
+    #         "local_x_range": (-4.2, 3.0),
+    #         "max_abs_local_y": 1.55,
+    #     },
+    # )
+    # continuous_wave_slopes_reach_end = DoneTerm(
+    #     func=mdp.continuous_wave_slopes_reach_end_timeout,
+    #     time_out=True,
+    #     params={
+    #         "terrain_types": ("continuous_wave_slopes",),
+    #         "finish_x_m": 3.70,
+    #         "max_abs_foot_y_m": 1.20,
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    #         ),
+    #     },
+    # )
+    # continuous_wave_slopes_lateral_exit = DoneTerm(
+    #     func=mdp.continuous_wave_slopes_lateral_exit,
+    #     params={
+    #         "terrain_types": ("continuous_wave_slopes",),
+    #         "finish_x_m": 3.70,
+    #         "max_abs_root_y_m": 1.20,
+    #         "max_abs_contact_y_m": 1.25,
+    #         "contact_force_threshold": 0.5,
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    #         ),
+    #         "contact_sensor_cfg": SceneEntityCfg(
+    #             "contact_sensor", body_names=".*_ankle_roll_link"
+    #         ),
+    #     },
+    # )
+    # continuous_wave_slopes_forbidden_contact = DoneTerm(
+    #     func=mdp.continuous_wave_slopes_forbidden_contact,
+    #     params={
+    #         "terrain_types": ("continuous_wave_slopes",),
+    #         "finish_x_m": 3.70,
+    #         "max_abs_foot_y_m": 1.20,
+    #         "threshold": 1.0,
+    #         "asset_cfg": SceneEntityCfg(
+    #             "robot", body_names=["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"]
+    #         ),
+    #         "sensor_cfg": SceneEntityCfg(
+    #             "contact_sensor",
+    #             body_names=[r"^(?!l_leg_ankle_roll_link$)(?!r_leg_ankle_roll_link$).+$"],
+    #         ),
+    #     },
+    # )
     # (5) Out of Bounds
     terrain_out_of_bounds = DoneTerm(func=mdp.terrain_out_of_bounds, time_out=True, params={"distance_buffer": 2.0})
 
@@ -1859,7 +1976,11 @@ class CurriculumCfg:
             "s_curve_reach_end_term": ("s_curve_reach_end", "s_curve_reverse_reach_end"),
             "s_curve_half_local_x": 0.0,
             "continuous_wave_terrain_types": ("continuous_wave_slopes",),
-            "continuous_wave_success_term": "continuous_wave_slopes_reach_end",
+            "continuous_wave_finish_x_m": 3.8,
+            "symmetric_slope_terrain_types": ("symmetric_slope",),
+            "symmetric_slope_finish_x_m": 1.7,
+            "braking_slope_terrain_types": ("braking_slope",),
+            "braking_slope_finish_x_m": 1.5,
         },
     )
     # pass

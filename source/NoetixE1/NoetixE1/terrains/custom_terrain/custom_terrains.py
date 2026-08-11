@@ -9,12 +9,114 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import trimesh
 from typing import TYPE_CHECKING
 
 from isaaclab.terrains.height_field.utils import height_field_to_mesh
 
 if TYPE_CHECKING:
     from . import custom_terrains_cfg
+
+
+def flat_pillars_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.MeshFlatPillarsTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate flat ground with sparse, non-overlapping vertical pillars."""
+    del difficulty
+
+    if not 0 < cfg.num_pillars_range[0] <= cfg.num_pillars_range[1]:
+        raise ValueError(f"Invalid num_pillars_range: {cfg.num_pillars_range}.")
+    for name, value_range in (
+        ("pillar_width_range", cfg.pillar_width_range),
+        ("pillar_thickness_range", cfg.pillar_thickness_range),
+        ("pillar_height_range", cfg.pillar_height_range),
+    ):
+        if value_range[0] <= 0.0 or value_range[1] < value_range[0]:
+            raise ValueError(f"Invalid {name}: {value_range}.")
+    if cfg.platform_width < 0.0 or cfg.boundary_margin < 0.0 or cfg.min_pillar_spacing < 0.0:
+        raise ValueError("platform_width, boundary_margin, and min_pillar_spacing must be non-negative.")
+    if cfg.max_sampling_attempts <= 0:
+        raise ValueError(f"max_sampling_attempts must be positive, got {cfg.max_sampling_attempts}.")
+
+    size_x, size_y = map(float, cfg.size)
+    if cfg.platform_width >= min(size_x, size_y):
+        raise ValueError(f"platform_width must be smaller than the terrain size, got {cfg.platform_width}.")
+    usable_x_min = float(cfg.boundary_margin)
+    usable_x_max = size_x - float(cfg.boundary_margin)
+    usable_y_min = float(cfg.boundary_margin)
+    usable_y_max = size_y - float(cfg.boundary_margin)
+    if usable_x_min >= usable_x_max or usable_y_min >= usable_y_max:
+        raise ValueError("boundary_margin leaves no usable pillar area.")
+
+    ground_thickness = 0.1
+    ground = trimesh.creation.box(
+        extents=(size_x, size_y, ground_thickness),
+        transform=trimesh.transformations.translation_matrix(
+            (size_x / 2.0, size_y / 2.0, -ground_thickness / 2.0)
+        ),
+    )
+    meshes = [ground]
+
+    center_x, center_y = size_x / 2.0, size_y / 2.0
+    platform_half_width = float(cfg.platform_width) / 2.0
+    platform_bounds = (
+        center_x - platform_half_width,
+        center_x + platform_half_width,
+        center_y - platform_half_width,
+        center_y + platform_half_width,
+    )
+    pillar_bounds: list[tuple[float, float, float, float]] = []
+    num_pillars = int(np.random.randint(cfg.num_pillars_range[0], cfg.num_pillars_range[1] + 1))
+
+    def _has_clearance(bounds_a, bounds_b) -> bool:
+        spacing = float(cfg.min_pillar_spacing)
+        ax1, ax2, ay1, ay2 = bounds_a
+        bx1, bx2, by1, by2 = bounds_b
+        return ax2 + spacing <= bx1 or bx2 + spacing <= ax1 or ay2 + spacing <= by1 or by2 + spacing <= ay1
+
+    for pillar_index in range(num_pillars):
+        placed = False
+        for _ in range(cfg.max_sampling_attempts):
+            width = float(np.random.uniform(*cfg.pillar_width_range))
+            thickness = float(np.random.uniform(*cfg.pillar_thickness_range))
+            height = float(np.random.uniform(*cfg.pillar_height_range))
+            if width > usable_x_max - usable_x_min or thickness > usable_y_max - usable_y_min:
+                continue
+
+            center_px = float(np.random.uniform(usable_x_min + width / 2.0, usable_x_max - width / 2.0))
+            center_py = float(
+                np.random.uniform(usable_y_min + thickness / 2.0, usable_y_max - thickness / 2.0)
+            )
+            bounds = (
+                center_px - width / 2.0,
+                center_px + width / 2.0,
+                center_py - thickness / 2.0,
+                center_py + thickness / 2.0,
+            )
+            if not _has_clearance(bounds, platform_bounds):
+                continue
+            if any(not _has_clearance(bounds, existing) for existing in pillar_bounds):
+                continue
+
+            pillar = trimesh.creation.box(
+                extents=(width, thickness, height),
+                transform=trimesh.transformations.translation_matrix(
+                    (center_px, center_py, height / 2.0)
+                ),
+            )
+            meshes.append(pillar)
+            pillar_bounds.append(bounds)
+            placed = True
+            break
+
+        if not placed:
+            raise RuntimeError(
+                f"Could not place pillar {pillar_index + 1}/{num_pillars}; "
+                "reduce pillar count, spacing, or clear-area constraints."
+            )
+
+    origin = np.array([center_x, center_y, 0.0], dtype=np.float64)
+    return meshes, origin
 
 
 @height_field_to_mesh
@@ -230,8 +332,41 @@ def thin_obstacles_terrain(
     return np.rint(hf_raw).astype(np.int16)
 
 
+def _resolve_pyramid_stair_discrete_geometry(
+    difficulty: float,
+    cfg: custom_terrains_cfg.HfNoisyPyramidStairsTerrainCfg,
+    width_pixels: int,
+    length_pixels: int,
+) -> tuple[int, int, int]:
+    """Resolve the integer stair dimensions shared by the height field and railing meshes."""
+    step_height = cfg.step_height_range[0] + difficulty * (cfg.step_height_range[1] - cfg.step_height_range[0])
+    if cfg.inverted:
+        step_height *= -1
+
+    if cfg.step_width_pixels_range is not None:
+        step_width = int(
+            cfg.step_width_pixels_range[0]
+            + difficulty * (cfg.step_width_pixels_range[1] - cfg.step_width_pixels_range[0])
+        )
+    elif cfg.step_width is not None:
+        step_width = int(cfg.step_width / cfg.horizontal_scale)
+    else:
+        raise ValueError("Either step_width_pixels_range or step_width must be provided")
+    if step_width <= 0:
+        raise ValueError(f"Resolved step width must be positive, got {step_width} pixels.")
+
+    step_height_pixels = int(step_height / cfg.vertical_scale)
+    if cfg.platform_width_pixels is not None:
+        platform_width_pixels = int(cfg.platform_width_pixels)
+    else:
+        platform_width_pixels = int(cfg.platform_width / cfg.horizontal_scale)
+    if platform_width_pixels <= 0 or platform_width_pixels >= min(width_pixels, length_pixels):
+        raise ValueError(f"Invalid platform width: {platform_width_pixels} pixels.")
+    return step_width, step_height_pixels, platform_width_pixels
+
+
 @height_field_to_mesh
-def noisy_pyramid_stairs_terrain(
+def _noisy_pyramid_stairs_height_field(
     difficulty: float, cfg: custom_terrains_cfg.HfNoisyPyramidStairsTerrainCfg
 ) -> np.ndarray:
     """Generate a terrain with a pyramid stair pattern and added noise.
@@ -248,37 +383,11 @@ def noisy_pyramid_stairs_terrain(
         The shape of the array is (width, length), where width and length are the number of points
         along the x and y axis, respectively.
     """
-    # resolve terrain configuration
-    step_height = cfg.step_height_range[0] + difficulty * (cfg.step_height_range[1] - cfg.step_height_range[0])
-    if cfg.inverted:
-        step_height *= -1
-    # switch parameters to discrete units
-    # -- terrain
-    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
-    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
-    # -- stairs: use pixel-based width if available to avoid precision loss
-    if cfg.step_width_pixels_range is not None:
-        # Use integer pixel range (越难越窄: width decreases with difficulty)
-        # step_width_pixels_range[0] is width at difficulty=0 (easier, wider)
-        # step_width_pixels_range[1] is width at difficulty=1 (harder, narrower)
-        step_width = int(
-            cfg.step_width_pixels_range[0] 
-            + difficulty * (cfg.step_width_pixels_range[1] - cfg.step_width_pixels_range[0])
-        )
-        # Note: difficulty values are not uniformly distributed (0.1, 0.2, 0.3...)
-        # When curriculum=True, difficulty is dynamically adjusted based on robot performance
-        # in each environment, resulting in values like 0.077, 0.143, 0.285, etc.
-    elif cfg.step_width is not None:
-        # Fallback to float-based width (for backward compatibility)
-        step_width = int(cfg.step_width / cfg.horizontal_scale)
-    else:
-        raise ValueError("Either step_width_pixels_range or step_width must be provided")
-    step_height = int(step_height / cfg.vertical_scale)
-    # -- platform: use pixel-based width if available to avoid precision loss
-    if cfg.platform_width_pixels is not None:
-        platform_width = cfg.platform_width_pixels
-    else:
-        platform_width = int(cfg.platform_width / cfg.horizontal_scale)
+    width_pixels = int(round(cfg.size[0] / cfg.horizontal_scale))
+    length_pixels = int(round(cfg.size[1] / cfg.horizontal_scale))
+    step_width, step_height, platform_width = _resolve_pyramid_stair_discrete_geometry(
+        difficulty, cfg, width_pixels, length_pixels
+    )
 
     # create a terrain with a flat platform at the center
     hf_raw = np.zeros((width_pixels, length_pixels))
@@ -312,6 +421,108 @@ def noisy_pyramid_stairs_terrain(
 
     # round off the heights to the nearest vertical step
     return np.rint(hf_raw).astype(np.int16)
+
+
+def _make_railing_box(
+    start_xy: tuple[float, float],
+    stop_xy: tuple[float, float],
+    bottom_z: float,
+    top_z: float,
+    thickness: float,
+    overlap: float,
+) -> trimesh.Trimesh:
+    """Create one vertical railing segment between two horizontal points."""
+    delta_x = stop_xy[0] - start_xy[0]
+    delta_y = stop_xy[1] - start_xy[1]
+    length = math.hypot(delta_x, delta_y) + overlap
+    height = top_z - bottom_z
+    if height <= 0.0:
+        raise ValueError(f"Railing top must be above its tread, got {top_z} <= {bottom_z}.")
+
+    transform = trimesh.transformations.rotation_matrix(math.atan2(delta_y, delta_x), (0.0, 0.0, 1.0))
+    transform[:3, 3] = (
+        (start_xy[0] + stop_xy[0]) / 2.0,
+        (start_xy[1] + stop_xy[1]) / 2.0,
+        (bottom_z + top_z) / 2.0,
+    )
+    return trimesh.creation.box(extents=(length, thickness, height), transform=transform)
+
+
+def noisy_pyramid_stairs_terrain(
+    difficulty: float, cfg: custom_terrains_cfg.HfNoisyPyramidStairsTerrainCfg
+) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate pyramid stairs and optionally add vertical railings on diagonal side seams."""
+    meshes, origin = _noisy_pyramid_stairs_height_field(difficulty, cfg)
+
+    tile_probability = float(cfg.railing_tile_probability)
+    side_probability = float(cfg.railing_side_probability)
+    if not 0.0 <= tile_probability <= 1.0 or not 0.0 <= side_probability <= 1.0:
+        raise ValueError("railing probabilities must lie in [0, 1].")
+    if tile_probability == 0.0 or np.random.uniform() >= tile_probability:
+        return meshes, origin
+    if cfg.railing_thickness <= 0.0:
+        raise ValueError(f"railing_thickness must be positive, got {cfg.railing_thickness}.")
+    clearance_min, clearance_max = cfg.railing_top_clearance_range
+    if clearance_min <= 0.0 or clearance_max < clearance_min:
+        raise ValueError(f"Invalid railing_top_clearance_range: {cfg.railing_top_clearance_range}.")
+
+    selected_sides = np.random.uniform(size=4) < side_probability
+    if cfg.ensure_one_railing and not selected_sides.any():
+        selected_sides[int(np.random.randint(0, 4))] = True
+    if not selected_sides.any():
+        return meshes, origin
+
+    full_width_pixels = int(cfg.size[0] / cfg.horizontal_scale) + 1
+    full_length_pixels = int(cfg.size[1] / cfg.horizontal_scale) + 1
+    border_pixels = int(cfg.border_width / cfg.horizontal_scale) + 1
+    inner_width_pixels = full_width_pixels - 2 * border_pixels
+    inner_length_pixels = full_length_pixels - 2 * border_pixels
+    step_width, step_height_pixels, platform_width = _resolve_pyramid_stair_discrete_geometry(
+        difficulty, cfg, inner_width_pixels, inner_length_pixels
+    )
+
+    num_steps = 0
+    remaining_x, remaining_y = inner_width_pixels, inner_length_pixels
+    while remaining_x > platform_width and remaining_y > platform_width:
+        num_steps += 1
+        remaining_x -= 2 * step_width
+        remaining_y -= 2 * step_width
+    if num_steps <= 0:
+        return meshes, origin
+
+    scale = float(cfg.horizontal_scale)
+    inner_low_x = border_pixels * scale
+    inner_low_y = border_pixels * scale
+    inner_high_x = inner_low_x + (inner_width_pixels - 1) * scale
+    inner_high_y = inner_low_y + (inner_length_pixels - 1) * scale
+    highest_step_z = max(0.0, num_steps * step_height_pixels * float(cfg.vertical_scale))
+    top_z = highest_step_z + float(np.random.uniform(clearance_min, clearance_max))
+    overlap = min(0.02, scale / 2.0)
+
+    for step_index in range(num_steps):
+        offset_0 = step_index * step_width * scale
+        offset_1 = (step_index + 1) * step_width * scale
+        bottom_z = step_index * step_height_pixels * float(cfg.vertical_scale)
+        side_segments = (
+            ((inner_low_x + offset_0, inner_low_y + offset_0), (inner_low_x + offset_1, inner_low_y + offset_1)),
+            ((inner_low_x + offset_0, inner_high_y - offset_0), (inner_low_x + offset_1, inner_high_y - offset_1)),
+            ((inner_high_x - offset_0, inner_high_y - offset_0), (inner_high_x - offset_1, inner_high_y - offset_1)),
+            ((inner_high_x - offset_0, inner_low_y + offset_0), (inner_high_x - offset_1, inner_low_y + offset_1)),
+        )
+        for side_index, (start_xy, stop_xy) in enumerate(side_segments):
+            if selected_sides[side_index]:
+                meshes.append(
+                    _make_railing_box(
+                        start_xy,
+                        stop_xy,
+                        bottom_z,
+                        top_z,
+                        float(cfg.railing_thickness),
+                        overlap,
+                    )
+                )
+
+    return meshes, origin
 
 
 @height_field_to_mesh

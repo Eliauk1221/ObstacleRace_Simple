@@ -10,8 +10,101 @@ from isaaclab.terrains.terrain_generator_cfg import SubTerrainBaseCfg
 from isaaclab.utils import configclass
 
 from . import custom_terrains
+from . import braking_slope_terrain
 from . import figure8_mesh_terrains
+from . import spiral_pyramid_stairs_terrain
+from . import symmetric_slope_terrain
 from isaaclab.terrains.height_field.hf_terrains_cfg import HfTerrainBaseCfg
+
+
+@configclass
+class MeshFlatPillarsTerrainCfg(SubTerrainBaseCfg):
+    """Flat mesh terrain with sparse, non-overlapping vertical pillars."""
+
+    function = custom_terrains.flat_pillars_terrain
+
+    pillar_width_range: tuple[float, float] = (0.1, 0.2)
+    """Pillar extent along the local x-axis, in meters."""
+
+    pillar_thickness_range: tuple[float, float] = (0.1, 0.2)
+    """Pillar extent along the local y-axis, in meters."""
+
+    pillar_height_range: tuple[float, float] = (1.0, 1.5)
+    """Pillar height above the flat ground, in meters."""
+
+    num_pillars_range: tuple[int, int] = (4, 8)
+    """Inclusive range for the number of pillars generated in each tile."""
+
+    platform_width: float = 2.0
+    """Width of the square pillar-free spawn area at the tile center."""
+
+    boundary_margin: float = 0.5
+    """Minimum distance between every pillar and the tile boundary."""
+
+    min_pillar_spacing: float = 0.3
+    """Minimum horizontal clearance between pillars and the center platform."""
+
+    max_sampling_attempts: int = 500
+    """Maximum placement attempts for each pillar."""
+
+
+@configclass
+class MeshSymmetricSlopeTerrainCfg(SubTerrainBaseCfg):
+    """Straight V-slope with two 20-degree sides and a collidable center gap."""
+
+    function = symmetric_slope_terrain.symmetric_slope_terrain
+
+    obstacle_length_m: float = 3.0
+    """Obstacle extent along the local positive x traversal direction."""
+
+    obstacle_width_m: float = 3.5
+    """Fixed outer width of both wedges and the center gap."""
+
+    slope_angle_deg: float = 20.0
+    """Angle of both transverse slope surfaces."""
+
+    gap_width_by_level: tuple[float, ...] = (
+        0.12,
+        0.115,
+        0.11,
+        0.105,
+        0.10,
+        0.10,
+        0.095,
+        0.09,
+        0.085,
+        0.08,
+    )
+    """Ordered center-gap widths from the easiest to the hardest terrain level."""
+
+    finish_flat_length_m: float = 0.2
+    """Flat ground immediately after the wedges used as the success contact region."""
+
+    ground_thickness_m: float = 0.1
+    """Thickness of the collidable tile ground, including the center gap floor."""
+
+
+@configclass
+class MeshBrakingSlopeTerrainCfg(SubTerrainBaseCfg):
+    """Four ordered stair treads connected directly to a 30-degree down slope."""
+
+    function = braking_slope_terrain.braking_slope_terrain
+
+    walkable_width_m: float = 2.0
+    num_steps: int = 4
+    slope_angle_deg: float = 30.0
+    slope_foot_x_m: float = 1.1
+    finish_flat_length_m: float = 0.4
+    success_region_length_m: float = 0.2
+    ground_thickness_m: float = 0.1
+    step_height_by_level: tuple[float, ...] = (
+        0.14, 0.1425, 0.145, 0.1475, 0.15,
+        0.15, 0.1525, 0.155, 0.1575, 0.16,
+    )
+    tread_depth_by_level: tuple[float, ...] = (
+        0.32, 0.315, 0.31, 0.305, 0.30,
+        0.30, 0.295, 0.29, 0.285, 0.28,
+    )
 
 
 @configclass
@@ -151,6 +244,21 @@ class HfNoisyPyramidStairsTerrainCfg(HfTerrainBaseCfg):
     noise_step: float = 0.005
     """The minimum height (in m) change between two noise points. Defaults to 0.005."""
 
+    railing_tile_probability: float = 0.0
+    """Probability that a generated stair tile contains diagonal side railings."""
+
+    railing_side_probability: float = 0.5
+    """Independent selection probability for each of the four diagonal stair side seams."""
+
+    ensure_one_railing: bool = True
+    """Whether a selected railing tile must contain at least one railing side."""
+
+    railing_thickness: float = 0.1
+    """Horizontal thickness of each continuous solid railing, in meters."""
+
+    railing_top_clearance_range: tuple[float, float] = (0.2, 0.5)
+    """Railing top elevation above the highest stair tread, in meters."""
+
 
 @configclass
 class HfNoisyInvertedPyramidStairsTerrainCfg(HfNoisyPyramidStairsTerrainCfg):
@@ -159,6 +267,62 @@ class HfNoisyInvertedPyramidStairsTerrainCfg(HfNoisyPyramidStairsTerrainCfg):
     Note:
         This is a subclass of :class:`HfNoisyPyramidStairsTerrainCfg` with :obj:`inverted` set to True.
     """
+
+    inverted: bool = True
+
+
+@configclass
+class MeshSpiralPyramidStairsTerrainCfg(SubTerrainBaseCfg):
+    """Exact rotated pyramid stairs with fixed horizontal geometry."""
+
+    function = spiral_pyramid_stairs_terrain.spiral_pyramid_stairs_terrain
+
+    step_height_range: tuple[float, float] = MISSING
+    """Minimum and maximum step heights controlled by terrain difficulty."""
+
+    num_steps: int = 7
+    """Fixed number of risers from the outer tread to the center platform."""
+
+    center_tread_depth: float = 0.33
+    """Tread depth at the center of each stair side, in meters."""
+
+    usable_tread_width: float = 2.0
+    """Width used to validate the inner and outer tread depths, in meters."""
+
+    platform_width: float = 2.0
+    """Exact side length of the square center platform, in meters."""
+
+    border_width: float = 0.5
+    """Minimum flat clearance between the stairs and the tile boundary."""
+
+    rotation_per_step_deg: float = 4.5
+    """Adjacent-level rotation: higher is counterclockwise from lower, in degrees."""
+
+    inverted: bool = False
+    """Whether the center platform is below the outer terrain surface."""
+
+    ground_thickness: float = 0.1
+    """Thickness below the lowest stair surface used to close the collision mesh."""
+
+    railing_tile_probability: float = 0.0
+    """Probability that a generated stair tile contains fan-shaped corner railings."""
+
+    railing_side_probability: float = 0.5
+    """Independent selection probability for each of the four corner railings."""
+
+    ensure_one_railing: bool = True
+    """Whether a selected railing tile must contain at least one railing side."""
+
+    railing_thickness: float = 0.1
+    """Horizontal thickness of each continuous solid railing, in meters."""
+
+    railing_top_clearance: float = 0.3
+    """Railing top elevation above the terrain's highest stair tread, in meters."""
+
+
+@configclass
+class MeshSpiralInvertedPyramidStairsTerrainCfg(MeshSpiralPyramidStairsTerrainCfg):
+    """Exact rotated pyramid stairs whose center platform is the lowest level."""
 
     inverted: bool = True
 
