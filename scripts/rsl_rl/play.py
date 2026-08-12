@@ -72,8 +72,6 @@ parser.add_argument(
         "spiral_stairs_up",
         "spiral_stairs_down",
         "figure8_bridge",
-        "s_curve",
-        "s_curve_reverse",
     ],
     help=(
         "Single-cell demo terrain: interlaced_corridor_wedges (首段中心出生), "
@@ -87,8 +85,7 @@ parser.add_argument(
         "pillar_flat (随机分布的高柱), "
         "stairs_up / stairs_down (带四条对角实体护板的上下台阶), "
         "spiral_stairs_up / spiral_stairs_down (相邻高度层旋转 4.5 度的螺旋上下台阶), "
-        "figure8_bridge (闭合 8 字桥, Trimesh), "
-        "s_curve / s_curve_reverse (正向/镜像 S 弯, Trimesh). "
+        "figure8_bridge (闭合 8 字桥, Trimesh). "
         "Empty string disables."
     ),
 )
@@ -460,9 +457,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
                     st: terrain_gen.HfThinObstaclesTerrainCfg(
                         proportion=1.0,
-                        obstacle_width=0.1,
-                        obstacle_length_range=(0.5, 1.5),
-                        obstacle_height=0.1,
+                        obstacle_width_range=(0.1, 0.15),
+                        obstacle_length=1.5,
+                        obstacle_height_range=(0.08, 0.18),
                         num_obstacles=30,
                         platform_width=1.0,
                         boundary_margin=0.5,
@@ -546,21 +543,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         samples_per_loop=128,
                     )
                 }
-            elif st in ("s_curve", "s_curve_reverse"):
-                env_cfg.scene.terrain.terrain_generator.size = (8.0, 8.0)
-                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
-                    st: terrain_gen.MeshSCurveTerrainCfg(
-                        proportion=1.0,
-                        size=(8.0, 8.0),
-                        radius_m=1.6,
-                        height_range_m=(0.08, 0.12),
-                        path_width_by_level=(1.0, 0.9, 0.81, 0.73, 0.66, 0.6, 0.55, 0.5, 0.45, 0.4),
-                        center_offset_m=(0.0, 0.0),
-                        mirror_x=st == "s_curve_reverse",
-                        samples_per_semicircle=64,
-                    )
-                }
-
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
     if CONTROL_ROBOT:

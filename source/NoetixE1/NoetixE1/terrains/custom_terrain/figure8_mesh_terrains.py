@@ -210,7 +210,6 @@ def build_s_curve_mesh(
     path_width_m: float,
     height_m: float,
     center_offset_m: tuple[float, float] = (0.0, 0.0),
-    mirror_x: bool = False,
     samples_per_semicircle: int = 64,
     ground_thickness: float = 0.1,
 ) -> trimesh.Trimesh:
@@ -242,9 +241,6 @@ def build_s_curve_mesh(
     parts: list[trimesh.Trimesh] = [_build_pit_ground(sx, sy, 0.0, ground_thickness)]
     for part in (upper, lower):
         if part.vertices.shape[0] > 0:
-            if mirror_x:
-                part.vertices[:, 0] = 2.0 * s_center[0] - part.vertices[:, 0]
-                part.fix_normals()
             parts.append(part)
 
     mesh = trimesh.util.concatenate(parts)
@@ -290,7 +286,6 @@ def s_curve_mesh_terrain(
         path_width_m=path_width,
         height_m=height,
         center_offset_m=center_offset,
-        mirror_x=bool(getattr(cfg, "mirror_x", False)),
         samples_per_semicircle=int(getattr(cfg, "samples_per_semicircle", 64)),
     )
 

@@ -304,13 +304,7 @@ class CommandsCfg:
                 zero_prob=[0.1, 0.9, 0.5],
             ),
             "s_curve": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
-                lin_vel_x=(0.8, 2.0),
-                lin_vel_y=(0.0, 0.0),
-                ang_vel_z=(0, 0),
-                zero_prob=[0.1, 0.9, 0.5],
-            ),
-            "s_curve_reverse": mdp.UniformVelocityWithZeroCommandCfg.Ranges(
-                lin_vel_x=(0.8, 2.0),
+                lin_vel_x=(0.8, 1.5),
                 lin_vel_y=(0.0, 0.0),
                 ang_vel_z=(0, 0),
                 zero_prob=[0.1, 0.9, 0.5],
@@ -679,6 +673,7 @@ class EventCfg:
             "joint_pos_range": (-0.2, 0.2),
             "joint_vel_range": (-1.0, 1.0),
             "terrain_specific_rsi_excluded_motion_files": {
+                "s_curve": [E1_RUNNING_MOTION_FILE],
                 "stairs_up": [E1_RUNNING_MOTION_FILE],
                 "spiral_stairs_up": [E1_RUNNING_MOTION_FILE],
                 "stairs_down": [E1_RUNNING_MOTION_FILE],
@@ -701,7 +696,6 @@ class EventCfg:
                 "symmetric_slope": (-0.17453292519943295, 0.17453292519943295),  # +/- 10 deg
                 "braking_slope": (-0.17453292519943295, 0.17453292519943295),  # +/- 10 deg
                 "s_curve": (2.9, 3.4),
-                "s_curve_reverse": (-0.2, 0.2),
             },
             "terrain_specific_pos_range": {
                 "cross_stepping_stones3": {
@@ -749,11 +743,7 @@ class EventCfg:
                     "y": (-0.2, 0.2),
                 },
                 "s_curve": {
-                    "x": (0.9, 1.2),
-                    "y": (-3.1, -3.3),
-                },
-                "s_curve_reverse": {
-                    "x": (-0.9, -1.2),
+                    "x": (0.6, 0.9),
                     "y": (-3.1, -3.3),
                 },
             },
@@ -917,7 +907,7 @@ class RewardsCfg:
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
         weight=1.2,
-        params={"std": 0.5, "skip_terrain_types": ("s_curve", "s_curve_reverse")},
+        params={"std": 0.5, "skip_terrain_types": ("s_curve",)},
     )
     track_lin_vel_x_linear = RewTerm(func=mdp.track_lin_x_speed_linear, weight=1.5)
     track_ang_vel_z_exp = RewTerm(
@@ -932,7 +922,7 @@ class RewardsCfg:
                 "continuous_wave_slopes",
                 "symmetric_slope"
             ),
-            "zero_terrain_types": ("s_curve", "s_curve_reverse"),
+            "zero_terrain_types": ("s_curve",),
             "gate_high_speed_positive": True,
         },
     )
@@ -966,7 +956,7 @@ class RewardsCfg:
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
                 "continuous_wave_slopes", "symmetric_slope", "braking_slope",
-                "s_curve", "s_curve_reverse",
+                "s_curve",
             ),
             "scale_on_terrain": 0.0,
         },
@@ -974,30 +964,30 @@ class RewardsCfg:
     lin_vel_dir_reward = RewTerm(
         func=mdp.lin_vel_dir_reward,
         weight=-0.5,
-        params={"skip_terrain_types": ("s_curve", "s_curve_reverse")},
+        params={"skip_terrain_types": ("s_curve",)},
     )
 
     # ------------------------------------------- s_curve -------------------------------------------
     s_curve_path_forward = RewTerm(
-        func=mdp.s_curve_path_forward_reward,
+        func=mdp.s_curve_path_forward_lookahead_reward,
         weight=1.2,
         params={
             "terrain_types": ("s_curve",),
             "std": 0.25,
             "min_cmd_speed": 0.0,
             "samples_per_semicircle": 64,
-            "inward_tangent_bias_deg": 10.0,
+            "lookahead_steps": 4,
         },
     )
     s_curve_heading_tangent = RewTerm(
-        func=mdp.s_curve_heading_tangent_reward,
+        func=mdp.s_curve_heading_lookahead_tangent_reward,
         weight=0.8,
         params={
             "terrain_types": ("s_curve",),
             "std": 0.5,
             "min_cmd_speed": 0.0,
             "samples_per_semicircle": 64,
-            "inward_tangent_bias_deg": 10.0,
+            "lookahead_steps": 4,
         },
     )
     s_curve_centerline = RewTerm(
@@ -1016,40 +1006,7 @@ class RewardsCfg:
         weight=-3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-            "terrain_types": ("s_curve", "s_curve_reverse"),
-        },
-    )
-    s_curve_reverse_path_forward = RewTerm(
-        func=mdp.s_curve_path_forward_reward,
-        weight=1.2,
-        params={
-            "terrain_types": ("s_curve_reverse",),
-            "std": 0.25,
-            "min_cmd_speed": 0.0,
-            "samples_per_semicircle": 64,
-            "inward_tangent_bias_deg": 10.0,
-        },
-    )
-    s_curve_reverse_heading_tangent = RewTerm(
-        func=mdp.s_curve_heading_tangent_reward,
-        weight=0.8,
-        params={
-            "terrain_types": ("s_curve_reverse",),
-            "std": 0.5,
-            "min_cmd_speed": 0.0,
-            "samples_per_semicircle": 64,
-            "inward_tangent_bias_deg": 10.0,
-        },
-    )
-    s_curve_reverse_centerline = RewTerm(
-        func=mdp.s_curve_centerline_reward,
-        weight=1.0,
-        params={
-            "terrain_types": ("s_curve_reverse",),
-            "std": 0.35,
-            "edge_buffer_m": 0.05,
-            "samples_per_semicircle": 64,
-            "inward_centerline_offset_m": 0.05,
+            "terrain_types": ("s_curve",),
         },
     )
 
@@ -1659,7 +1616,7 @@ class RewardsCfg:
                 "interlaced_corridor_wedges", "interlaced_corridor_wedges_approach",
                 "interlaced_corridor_wedges_smooth_exit",
                 "interlaced_corridor_wedges_smooth_entry_exit",
-                "s_curve", "s_curve_reverse",
+                "s_curve",
                 "continuous_wave_slopes", "symmetric_slope", "braking_slope"
             ),
         },
@@ -1717,7 +1674,7 @@ class RewardsCfg:
                 "stairs_up", "stairs_down", "spiral_stairs_up", "spiral_stairs_down",
                 "gap", "discrete_obstacles", "thin_obstacles", "pillar_flat", "hurdle",
                 "stepping_stones", "cross_stepping_stones2", "cross_stepping_stones1",
-                "s_curve", "s_curve_reverse",
+                "s_curve",
             ),
         },
     )
@@ -1849,48 +1806,27 @@ class TerminationsCfg:
     #         "transition_x_margin_m": 0.06,
     #     },
     # )
-    # s_curve_reach_end = DoneTerm(
-    #     func=mdp.s_curve_reach_end_timeout,
-    #     time_out=True,
-    #     params={
-    #         "terrain_types": ["s_curve"],
-    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-    #         "contact_force_threshold": 0.5,
-    #         "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
-    #         "end_region_xy_range": (-0.5, -2.5, 2.6, 3.8),
-    #     },
-    # )
-    # s_curve_invalid_contact = DoneTerm(
-    #     func=mdp.s_curve_invalid_contact,
-    #     params={
-    #         "terrain_types": ["s_curve"],
-    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-    #         "contact_force_threshold": 0.5,
-    #         "start_region_xy_range": (1.5, 0.0, -3.8, -2.6),
-    #         "end_region_xy_range": (0.0, -2.0, 2.6, 3.8),
-    #     },
-    # )
-    # s_curve_reverse_reach_end = DoneTerm(
-    #     func=mdp.s_curve_reach_end_timeout,
-    #     time_out=True,
-    #     params={
-    #         "terrain_types": ["s_curve_reverse"],
-    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-    #         "contact_force_threshold": 0.5,
-    #         "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
-    #         "end_region_xy_range": (0.5, 2.5, 2.6, 3.8),
-    #     },
-    # )
-    # s_curve_reverse_invalid_contact = DoneTerm(
-    #     func=mdp.s_curve_invalid_contact,
-    #     params={
-    #         "terrain_types": ["s_curve_reverse"],
-    #         "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
-    #         "contact_force_threshold": 0.5,
-    #         "start_region_xy_range": (-1.5, 0.0, -3.8, -2.6),
-    #         "end_region_xy_range": (0.0, 2.0, 2.6, 3.8),
-    #     },
-    # )
+    s_curve_reach_end = DoneTerm(
+        func=mdp.s_curve_reach_end_timeout,
+        time_out=True,
+        params={
+            "terrain_types": ["s_curve"],
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "contact_force_threshold": 0.5,
+            "start_region_xy_range": (1.0, 0.0, -3.8, -2.6),
+            "end_region_xy_range": (0.0, -1.5, 2.6, 3.8),
+        },
+    )
+    s_curve_invalid_contact = DoneTerm(
+        func=mdp.s_curve_invalid_contact,
+        params={
+            "terrain_types": ["s_curve"],
+            "contact_sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*_ankle_roll_link"),
+            "contact_force_threshold": 0.5,
+            "start_region_xy_range": (1.0, 0.0, -3.8, -2.6),
+            "end_region_xy_range": (0.0, -1.5, 2.6, 3.8),
+        },
+    )
     # approach_corridor_lateral_exit = DoneTerm(
     #     func=mdp.interlaced_corridor_lateral_exit,
     #     params={
@@ -1972,8 +1908,8 @@ class CurriculumCfg:
     terrain_levels = CurrTerm(
         func=mdp.terrain_levels_vel_with_termination,
         params={
-            "s_curve_terrain_types": ("s_curve", "s_curve_reverse"),
-            "s_curve_reach_end_term": ("s_curve_reach_end", "s_curve_reverse_reach_end"),
+            "s_curve_terrain_types": ("s_curve",),
+            "s_curve_reach_end_term": "s_curve_reach_end",
             "s_curve_half_local_x": 0.0,
             "continuous_wave_terrain_types": ("continuous_wave_slopes",),
             "continuous_wave_finish_x_m": 3.8,

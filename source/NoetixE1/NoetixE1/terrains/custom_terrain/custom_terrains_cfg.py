@@ -171,14 +171,14 @@ class HfThinObstaclesTerrainCfg(HfTerrainBaseCfg):
 
     function = custom_terrains.thin_obstacles_terrain
 
-    obstacle_width: float = 0.1
-    """The short horizontal dimension of each obstacle, in meters."""
+    obstacle_width_range: tuple[float, float] = (0.1, 0.15)
+    """The sampled short horizontal dimension of each obstacle, in meters."""
 
-    obstacle_length_range: tuple[float, float] = (0.5, 1.5)
-    """The sampled long horizontal dimension of each obstacle, in meters."""
+    obstacle_length: float = 1.5
+    """The fixed long horizontal dimension of each obstacle, in meters."""
 
-    obstacle_height: float = 0.1
-    """The positive obstacle height, in meters."""
+    obstacle_height_range: tuple[float, float] = (0.08, 0.18)
+    """The sampled positive obstacle height of each obstacle, in meters."""
 
     num_obstacles: int = 30
     """The exact number of obstacles to place."""
@@ -722,9 +722,6 @@ class MeshSCurveTerrainCfg(SubTerrainBaseCfg):
 
     center_offset_m: tuple[float, float] = (0.0, 0.0)
     """S 型中心点相对子地形原点的偏移（米，x/y）。"""
-
-    mirror_x: bool = False
-    """是否沿子地形局部 y 轴镜像 S 型，即 x -> -x。"""
 
     samples_per_semicircle: int = 64
     """每个半圆的离散段数（越大越光滑）。"""

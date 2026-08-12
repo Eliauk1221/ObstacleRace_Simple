@@ -150,25 +150,15 @@ def _s_curve_width_for_terrain_levels(env: ManagerBasedRLEnv, sub) -> torch.Tens
     return float(width_lo) + difficulty.clamp(0.0, 1.0) * float(width_hi - width_lo)
 
 
-def _s_curve_sub_terrain_name(terrain_types: list[str] | tuple[str, ...]) -> str:
-    if not terrain_types:
-        return "s_curve"
-    return str(terrain_types[0])
-
-
-def _s_curve_geometry_per_env(
-    env: ManagerBasedRLEnv, terrain_types: list[str] | tuple[str, ...] = ("s_curve",)
-) -> tuple[float, torch.Tensor, tuple[float, float], bool]:
-    sub_terrain_name = _s_curve_sub_terrain_name(terrain_types)
+def _s_curve_geometry_per_env(env: ManagerBasedRLEnv) -> tuple[float, torch.Tensor, tuple[float, float]]:
     terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
-    sub = terrain_gen_cfg.sub_terrains.get(sub_terrain_name)
+    sub = terrain_gen_cfg.sub_terrains.get("s_curve")
     if sub is None:
-        raise KeyError(f"{sub_terrain_name} sub_terrain not found in terrain_generator.sub_terrains")
+        raise KeyError("s_curve sub_terrain not found in terrain_generator.sub_terrains")
     radius_m = float(sub.radius_m)
     path_width_m = _s_curve_width_for_terrain_levels(env, sub)
     center_offset_m = tuple(float(v) for v in getattr(sub, "center_offset_m", (0.0, 0.0)))
-    mirror_x = bool(getattr(sub, "mirror_x", False))
-    return radius_m, path_width_m, center_offset_m, mirror_x
+    return radius_m, path_width_m, center_offset_m
 
 
 def _s_curve_region_masks(
@@ -178,25 +168,21 @@ def _s_curve_region_masks(
     center_offset_m: tuple[float, float],
     start_region_xy_range: tuple[float, float, float, float],
     end_region_xy_range: tuple[float, float, float, float],
-    mirror_x: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     center = torch.tensor(center_offset_m, dtype=foot_xy.dtype, device=foot_xy.device)
     rel = foot_xy - center.view(1, 1, 2)
-    bridge_rel = rel.clone()
-    if mirror_x:
-        bridge_rel[..., 0] = -bridge_rel[..., 0]
     half_width = 0.5 * path_width_m.view(-1, 1)
     band_lo = (float(radius_m) - half_width).clamp(min=0.0)
     band_hi = float(radius_m) + half_width
 
     upper_center = torch.tensor((0.0, radius_m), dtype=foot_xy.dtype, device=foot_xy.device)
     lower_center = torch.tensor((0.0, -radius_m), dtype=foot_xy.dtype, device=foot_xy.device)
-    upper_rel = bridge_rel - upper_center.view(1, 1, 2)
-    lower_rel = bridge_rel - lower_center.view(1, 1, 2)
+    upper_rel = rel - upper_center.view(1, 1, 2)
+    lower_rel = rel - lower_center.view(1, 1, 2)
     upper_dist = torch.norm(upper_rel, dim=-1)
     lower_dist = torch.norm(lower_rel, dim=-1)
-    on_upper = (bridge_rel[..., 0] >= 0.0) & (upper_dist >= band_lo) & (upper_dist <= band_hi)
-    on_lower = (bridge_rel[..., 0] <= 0.0) & (lower_dist >= band_lo) & (lower_dist <= band_hi)
+    on_upper = (rel[..., 0] >= 0.0) & (upper_dist >= band_lo) & (upper_dist <= band_hi)
+    on_lower = (rel[..., 0] <= 0.0) & (lower_dist >= band_lo) & (lower_dist <= band_hi)
     on_bridge = on_upper | on_lower
 
     start_x_lo, start_x_hi, start_y_lo, start_y_hi = [float(v) for v in start_region_xy_range]
@@ -232,7 +218,7 @@ def s_curve_reach_end_timeout(
     if not on_terrain.any():
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-    radius_m, path_width_m, center_offset_m, mirror_x = _s_curve_geometry_per_env(env, terrain_types)
+    radius_m, path_width_m, center_offset_m = _s_curve_geometry_per_env(env)
     asset: Articulation = env.scene[asset_cfg.name]
     contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
     foot_body_ids = contact_sensor_cfg.body_ids
@@ -244,7 +230,6 @@ def s_curve_reach_end_timeout(
         center_offset_m,
         start_region_xy_range=start_region_xy_range,
         end_region_xy_range=end_region_xy_range,
-        mirror_x=mirror_x,
     )
 
     net_contact_forces = contact_sensor.data.net_forces_w_history
@@ -272,7 +257,7 @@ def s_curve_invalid_contact(
     if not on_terrain.any():
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-    radius_m, path_width_m, center_offset_m, mirror_x = _s_curve_geometry_per_env(env, terrain_types)
+    radius_m, path_width_m, center_offset_m = _s_curve_geometry_per_env(env)
     asset: Articulation = env.scene[asset_cfg.name]
     contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
     foot_body_ids = contact_sensor_cfg.body_ids
@@ -284,7 +269,6 @@ def s_curve_invalid_contact(
         center_offset_m,
         start_region_xy_range=start_region_xy_range,
         end_region_xy_range=end_region_xy_range,
-        mirror_x=mirror_x,
     )
 
     net_contact_forces = contact_sensor.data.net_forces_w_history

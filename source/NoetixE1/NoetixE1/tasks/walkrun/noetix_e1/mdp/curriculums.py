@@ -594,7 +594,7 @@ def terrain_levels_vel_with_termination(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    s_curve_terrain_types: tuple[str, ...] | list[str] = (),
+    s_curve_terrain_types: tuple[str, ...] | list[str] = ("s_curve",),
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
     continuous_wave_terrain_types: tuple[str, ...] | list[str] = (),
@@ -825,14 +825,6 @@ def terrain_levels_vel_with_termination(
 
     # S 弯到达终点才升档；未过半程即失败则降档，过半后失败保持等级。
     if is_s_curve.any():
-        current_cols = terrain.terrain_types[env_ids_tensor].long()
-        names_to_cols = get_terrain_type_names_to_col_map(env)
-        mirrored_s_curve_cols = []
-        for terrain_type in s_curve_terrain_types:
-            sub = getattr(terrain_gen_cfg, "sub_terrains", {}).get(terrain_type)
-            if bool(getattr(sub, "mirror_x", False)):
-                mirrored_s_curve_cols.extend(names_to_cols.get(terrain_type, []))
-
         local_x = asset.data.root_pos_w[env_ids_tensor, 0] - env.scene.env_origins[env_ids_tensor, 0]
         reached_end = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
         reach_terms = (
@@ -846,18 +838,7 @@ def terrain_levels_vel_with_termination(
             except KeyError:
                 pass
 
-        passed_half_normal = local_x < float(s_curve_half_local_x)
-        if mirrored_s_curve_cols:
-            mirrored_cols_t = torch.tensor(
-                mirrored_s_curve_cols, dtype=current_cols.dtype, device=env.device
-            )
-            is_mirrored_s_curve = (
-                current_cols.unsqueeze(1) == mirrored_cols_t.unsqueeze(0)
-            ).any(dim=1)
-            passed_half_mirrored = local_x > float(s_curve_half_local_x)
-            passed_half = torch.where(is_mirrored_s_curve, passed_half_mirrored, passed_half_normal)
-        else:
-            passed_half = passed_half_normal
+        passed_half = local_x < float(s_curve_half_local_x)
 
         s_curve_move_up = reached_end
         s_curve_move_down = ~reached_end & ~passed_half

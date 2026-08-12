@@ -265,17 +265,22 @@ def thin_obstacles_terrain(
 
     width_pixels = int(round(cfg.size[0] / cfg.horizontal_scale))
     length_pixels = int(round(cfg.size[1] / cfg.horizontal_scale))
-    obstacle_width_pixels = max(1, int(round(cfg.obstacle_width / cfg.horizontal_scale)))
-    length_min_pixels = max(1, int(round(cfg.obstacle_length_range[0] / cfg.horizontal_scale)))
-    length_max_pixels = max(length_min_pixels, int(round(cfg.obstacle_length_range[1] / cfg.horizontal_scale)))
-    obstacle_height_pixels = int(round(cfg.obstacle_height / cfg.vertical_scale))
+    width_min_pixels = int(round(cfg.obstacle_width_range[0] / cfg.horizontal_scale))
+    width_max_pixels = int(round(cfg.obstacle_width_range[1] / cfg.horizontal_scale))
+    obstacle_length_pixels = int(round(cfg.obstacle_length / cfg.horizontal_scale))
+    height_min_pixels = int(round(cfg.obstacle_height_range[0] / cfg.vertical_scale))
+    height_max_pixels = int(round(cfg.obstacle_height_range[1] / cfg.vertical_scale))
     boundary_margin_pixels = max(0, int(round(cfg.boundary_margin / cfg.horizontal_scale)))
     platform_width_pixels = max(0, int(round(cfg.platform_width / cfg.horizontal_scale)))
 
-    if boundary_margin_pixels * 2 + obstacle_width_pixels > min(width_pixels, length_pixels):
+    if width_min_pixels <= 0 or width_max_pixels < width_min_pixels:
+        raise ValueError("obstacle_width_range must be positive and ordered")
+    if obstacle_length_pixels <= 0:
+        raise ValueError("obstacle_length must be positive")
+    if height_min_pixels <= 0 or height_max_pixels < height_min_pixels:
+        raise ValueError("obstacle_height_range must be positive and ordered")
+    if boundary_margin_pixels * 2 + width_max_pixels > min(width_pixels, length_pixels):
         raise ValueError("boundary_margin leaves no room for thin obstacles")
-    if obstacle_height_pixels <= 0:
-        raise ValueError("obstacle_height must be positive")
 
     hf_raw = np.zeros((width_pixels, length_pixels), dtype=np.float32)
     occupied = np.zeros((width_pixels, length_pixels), dtype=bool)
@@ -293,9 +298,7 @@ def thin_obstacles_terrain(
     for obstacle_index in range(cfg.num_obstacles):
         placed = False
         for _ in range(cfg.max_sampling_attempts):
-            obstacle_length_pixels = int(
-                np.random.randint(length_min_pixels, length_max_pixels + 1)
-            )
+            obstacle_width_pixels = int(np.random.randint(width_min_pixels, width_max_pixels + 1))
             if np.random.randint(0, 2) == 0:
                 size_x, size_y = obstacle_length_pixels, obstacle_width_pixels
             else:
@@ -319,6 +322,7 @@ def thin_obstacles_terrain(
                 continue
 
             occupied[x_start:x_stop, y_start:y_stop] = True
+            obstacle_height_pixels = int(np.random.randint(height_min_pixels, height_max_pixels + 1))
             hf_raw[x_start:x_stop, y_start:y_stop] = obstacle_height_pixels
             placed = True
             break
