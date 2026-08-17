@@ -25,6 +25,9 @@ class EdgeCylinderCfg(VirtualObstacleCfg):
     cylinder_radius: float = 0.2
     """Default radius of edge cylinders (non-classified edges)."""
 
+    terrain_specific_cylinder_radius: dict[str, float] | None = None
+    """Optional edge-cylinder radius overrides keyed by sub-terrain name."""
+
     inner_edge_cylinder_radius: float | None = None
     """If set with ``outer_edge_cylinder_radius``, figure8 inner annulus edges use this (smaller) radius."""
 

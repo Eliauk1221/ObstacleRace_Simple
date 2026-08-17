@@ -1164,25 +1164,35 @@ def hurdle_terrain(
     # create a flat terrain at ground level (height = 0)
     hf_raw = np.zeros((width_pixels, length_pixels), dtype=np.float32)
 
-    # resolve hurdle configuration based on difficulty
-    # Hurdle height increases with difficulty
-    hurdle_height = cfg.hurdle_height_range[0] + difficulty * (cfg.hurdle_height_range[1] - cfg.hurdle_height_range[0])
+    num_hurdles = int(cfg.num_hurdles)
+    if num_hurdles < 1:
+        raise ValueError(f"num_hurdles must be >= 1, got {num_hurdles}")
+
+    # Resolve either the existing shared curriculum height or fixed per-ring heights.
+    if cfg.hurdle_heights_m is None:
+        hurdle_height = cfg.hurdle_height_range[0] + difficulty * (
+            cfg.hurdle_height_range[1] - cfg.hurdle_height_range[0]
+        )
+        hurdle_heights = [hurdle_height] * num_hurdles
+    else:
+        if len(cfg.hurdle_heights_m) != num_hurdles:
+            raise ValueError("hurdle_heights_m length must equal num_hurdles")
+        hurdle_heights = [float(height) for height in cfg.hurdle_heights_m]
+        if any(height < 0.0 for height in hurdle_heights):
+            raise ValueError("hurdle_heights_m values must be non-negative")
     platform_width = cfg.platform_width
     
-    # Fixed number of hurdles: 3
-    num_hurdles = 3
-    
-    # Get hurdle widths (can be single value or tuple of 3 values)
+    # Get hurdle widths (can be a single value or one value per hurdle).
     if isinstance(cfg.hurdle_width_pixels, tuple):
-        if len(cfg.hurdle_width_pixels) != 3:
-            raise ValueError("hurdle_width_pixels tuple must have exactly 3 elements")
+        if len(cfg.hurdle_width_pixels) != num_hurdles:
+            raise ValueError("hurdle_width_pixels tuple length must equal num_hurdles")
         hurdle_width_pixels_list = list(cfg.hurdle_width_pixels)
     else:
         # Single value: all hurdles have the same width
-        hurdle_width_pixels_list = [cfg.hurdle_width_pixels] * 3
+        hurdle_width_pixels_list = [cfg.hurdle_width_pixels] * num_hurdles
     
     # convert to discrete units
-    hurdle_height_pixels = int(hurdle_height / cfg.vertical_scale)
+    hurdle_height_pixels_list = [int(height / cfg.vertical_scale) for height in hurdle_heights]
     platform_width_pixels = int(platform_width / cfg.horizontal_scale)
     
     # Hurdle structure is always centered at terrain center
@@ -1196,16 +1206,37 @@ def hurdle_terrain(
     # Calculate available space for uniform distribution
     terrain_half_size_pixels = min(width_pixels, length_pixels) // 2
     platform_half_size_pixels = platform_width_pixels // 2
+
+    first_hurdle_inner_half = None
+    if cfg.first_hurdle_distance is not None:
+        first_hurdle_inner_half = int(cfg.first_hurdle_distance / cfg.horizontal_scale)
+        if first_hurdle_inner_half <= 0:
+            raise ValueError(f"first_hurdle_distance must be > 0, got {cfg.first_hurdle_distance}")
+        if first_hurdle_inner_half >= terrain_half_size_pixels:
+            raise ValueError(
+                f"first_hurdle_distance ({cfg.first_hurdle_distance}) exceeds terrain half-size"
+            )
+        platform_half_size_pixels = min(platform_half_size_pixels, first_hurdle_inner_half)
+        platform_width_pixels = platform_half_size_pixels * 2
+
     available_space_pixels = terrain_half_size_pixels - platform_half_size_pixels
     
     # Calculate total width of all hurdles
     total_hurdle_width_pixels = sum(hurdle_width_pixels_list)
     
-    # Calculate uniform spacing between hurdles (4 gaps: platform->hurdle1, hurdle1->hurdle2, hurdle2->hurdle3, hurdle3->edge)
-    # We have: platform + gap1 + hurdle1 + gap2 + hurdle2 + gap3 + hurdle3 + gap4 = terrain_edge
-    # gap1 = gap2 = gap3 = gap4 for uniform distribution
-    remaining_space = available_space_pixels - total_hurdle_width_pixels
-    uniform_gap_pixels = remaining_space // 4  # 4 gaps for uniform distribution
+    if first_hurdle_inner_half is not None:
+        first_gap_pixels = max(0, first_hurdle_inner_half - platform_half_size_pixels)
+        space_after_first = available_space_pixels - first_gap_pixels - hurdle_width_pixels_list[0]
+        remaining_hurdle_width = sum(hurdle_width_pixels_list[1:])
+        uniform_gap_pixels = max(
+            0,
+            (space_after_first - remaining_hurdle_width) // num_hurdles,
+        )
+        gap_pixels_list = [first_gap_pixels] + [uniform_gap_pixels] * (num_hurdles - 1)
+    else:
+        remaining_space = available_space_pixels - total_hurdle_width_pixels
+        uniform_gap_pixels = remaining_space // (num_hurdles + 1)
+        gap_pixels_list = [uniform_gap_pixels] * num_hurdles
     
     # Build nested structure from inside to outside
     # Structure from inside to outside: 
@@ -1224,12 +1255,12 @@ def hurdle_terrain(
     platform_end_y = min(length_pixels, hurdle_center_y_pixels + current_inner_half)
     hf_raw[platform_start_x:platform_end_x, platform_start_y:platform_end_y] = 0
     
-    # Create 3 hurdles uniformly distributed: from inside to outside
+    # Create hurdles from inside to outside.
     for hurdle_idx in range(num_hurdles):
         # Add gap (ground ring) before this hurdle
         prev_inner_size = current_inner_size
         prev_inner_half = prev_inner_size // 2
-        current_inner_size += 2 * uniform_gap_pixels
+        current_inner_size += 2 * gap_pixels_list[hurdle_idx]
         current_inner_half = current_inner_size // 2
         
         # Calculate bounds for ground ring (gap)
@@ -1285,7 +1316,9 @@ def hurdle_terrain(
                 hurdle_ring_mask = (max_dist >= prev_inner_half) & (max_dist < current_inner_half)
                 
                 # Set the hurdle ring area to hurdle height (only the ring area)
-                hf_raw[hurdle_outer_start_x:hurdle_outer_end_x, hurdle_outer_start_y:hurdle_outer_end_y][hurdle_ring_mask] = hurdle_height_pixels
+                hf_raw[hurdle_outer_start_x:hurdle_outer_end_x, hurdle_outer_start_y:hurdle_outer_end_y][
+                    hurdle_ring_mask
+                ] = hurdle_height_pixels_list[hurdle_idx]
 
     # round off the heights to the nearest vertical step
     return np.rint(hf_raw).astype(np.int16)

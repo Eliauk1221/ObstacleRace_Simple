@@ -4,7 +4,8 @@ import torch.nn as nn
 
 class CnnAttnDepthEncoder(nn.Module):
     def __init__(self, latent_dim: int, hidden_dim: int = 32,
-                 proprio_dim: int = 48, estimator_dim: int = 3, num_heads: int = 4):
+                 proprio_dim: int = 48, estimator_dim: int = 3, num_heads: int = 4,
+                 attention_batch_size: int = 4096):
         """
         Args:
             latent_dim: Output dimension of the encoder (default 32 in ActorCritic).
@@ -13,6 +14,8 @@ class CnnAttnDepthEncoder(nn.Module):
             proprio_dim: Dimension of the proprioceptive observation (current state).
             estimator_dim: Dimension of the estimator output (vel + latent).
             num_heads: Number of attention heads.
+            attention_batch_size: Maximum batch size passed to a single CUDA
+                scaled-dot-product-attention kernel launch.
         """
         super().__init__()
 
@@ -48,12 +51,35 @@ class CnnAttnDepthEncoder(nn.Module):
         # Multi-head Attention
         # embed_dim=hidden_dim, num_heads=num_heads
         self.mha = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
+        if attention_batch_size <= 0:
+            raise ValueError(f"attention_batch_size must be positive, got {attention_batch_size}")
+        self.attention_batch_size = attention_batch_size
 
         # Output projection
         self.out_proj = nn.Sequential(
             nn.Linear(hidden_dim, latent_dim),
             nn.ELU(),
         )
+
+    def _apply_attention(self, query, key_value, need_weights=False):
+        """Run attention in independent batch chunks to avoid oversized CUDA launches."""
+        if query.shape[0] <= self.attention_batch_size:
+            return self.mha(query, key_value, key_value, need_weights=need_weights)
+
+        outputs = []
+        weights = [] if need_weights else None
+        for start in range(0, query.shape[0], self.attention_batch_size):
+            end = start + self.attention_batch_size
+            output, weight = self.mha(
+                query[start:end],
+                key_value[start:end],
+                key_value[start:end],
+                need_weights=need_weights,
+            )
+            outputs.append(output)
+            if need_weights:
+                weights.append(weight)
+        return torch.cat(outputs, dim=0), torch.cat(weights, dim=0) if need_weights else None
 
     def forward(self, depths, proprio, vel):
         # depths: [B, H, W, 1] -> [B, 1, H, W]
@@ -83,7 +109,7 @@ class CnnAttnDepthEncoder(nn.Module):
         # query: [B, 1, hidden_dim]
         # key, value: [B, N, hidden_dim]
         # MHA returns (attn_output, attn_output_weights)
-        attn_output, _ = self.mha(query, key_value, key_value, need_weights=False)
+        attn_output, _ = self._apply_attention(query, key_value, need_weights=False)
 
         # attn_output: [B, 1, hidden_dim]
         out = attn_output.squeeze(1)  # [B, hidden_dim]
@@ -123,7 +149,7 @@ class CnnAttnDepthEncoder(nn.Module):
         query = query.unsqueeze(1)  # [B, 1, hidden_dim]
 
         # Get attention weights
-        _, attn_weights = self.mha(query, key_value, key_value, need_weights=True)
+        _, attn_weights = self._apply_attention(query, key_value, need_weights=True)
 
         # attn_weights shape: [B, num_heads, 1, num_patches] if num_heads > 1
         # or [B, 1, num_patches] if num_heads == 1

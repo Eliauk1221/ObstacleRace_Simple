@@ -38,6 +38,10 @@ class EdgeCylinder(VirtualObstacleBase):
     def __init__(self, cfg: EdgeCylinderCfg):
         self.cfg: EdgeCylinderCfg = cfg
         self.angle_threshold = cfg.angle_threshold
+        self._terrain_generator = None
+
+    def bind_terrain_generator(self, terrain_generator) -> None:
+        self._terrain_generator = terrain_generator
 
     def generate(self, mesh: trimesh.Trimesh, device="cpu") -> None:
         """Detect sharp edges in the mesh and store the edge cylinder as virtual obstacle.
@@ -89,12 +93,13 @@ class EdgeCylinder(VirtualObstacleBase):
         """Per-edge radii; optionally shrink figure8 inner edges and enlarge outer edges."""
         num_edges = edge_end_points.shape[0]
         radii = np.full((num_edges, 1), float(self.cfg.cylinder_radius), dtype=np.float32)
+        mid = 0.5 * (edge_end_points[:, :3] + edge_end_points[:, 3:6])
+        self._apply_terrain_specific_radii(mid, radii)
         inner_r_cyl = getattr(self.cfg, "inner_edge_cylinder_radius", None)
         outer_r_cyl = getattr(self.cfg, "outer_edge_cylinder_radius", None)
         if inner_r_cyl is None or outer_r_cyl is None or num_edges == 0:
             return radii
 
-        mid = 0.5 * (edge_end_points[:, :3] + edge_end_points[:, 3:6])
         z_lo, z_hi = getattr(self.cfg, "figure8_edge_z_range_m", (0.02, 0.20))
         in_z = (mid[:, 2] >= float(z_lo)) & (mid[:, 2] <= float(z_hi))
         if not np.any(in_z):
@@ -135,6 +140,52 @@ class EdgeCylinder(VirtualObstacleBase):
                 f"default={num_edges - n_in - n_out} (r={self.cfg.cylinder_radius})"
             )
         return radii
+
+    def _apply_terrain_specific_radii(self, midpoints: np.ndarray, radii: np.ndarray) -> None:
+        overrides = getattr(self.cfg, "terrain_specific_cylinder_radius", None) or {}
+        if not overrides or midpoints.shape[0] == 0:
+            return
+
+        terrain_generator = self._terrain_generator
+        keys = getattr(terrain_generator, "_subterrain_keys", None)
+        if terrain_generator is None or keys is None:
+            raise RuntimeError("Terrain-specific edge radii require per-cell terrain metadata.")
+
+        num_rows = int(terrain_generator.cfg.num_rows)
+        num_cols = int(terrain_generator.cfg.num_cols)
+        if len(keys) != num_rows * num_cols:
+            raise RuntimeError(
+                f"Terrain edge metadata is incomplete: keys={len(keys)}, expected={num_rows * num_cols}."
+            )
+        size_x, size_y = (float(value) for value in terrain_generator.cfg.size)
+        curriculum = bool(terrain_generator.cfg.curriculum)
+        matched_by_name = {name: 0 for name in overrides}
+        for index, terrain_name in enumerate(keys):
+            if terrain_name not in overrides:
+                continue
+            radius = float(overrides[terrain_name])
+            if radius <= 0.0:
+                raise ValueError(
+                    f"Edge-cylinder radius for terrain '{terrain_name}' must be positive, got {radius}."
+                )
+            if curriculum:
+                row, col = index % num_rows, index // num_rows
+            else:
+                row, col = index // num_cols, index % num_cols
+            center_x = (row + 0.5) * size_x - num_rows * size_x * 0.5
+            center_y = (col + 0.5) * size_y - num_cols * size_y * 0.5
+            in_cell = (
+                (np.abs(midpoints[:, 0] - center_x) < 0.5 * size_x)
+                & (np.abs(midpoints[:, 1] - center_y) < 0.5 * size_y)
+            )
+            radii[in_cell, 0] = radius
+            matched_by_name[terrain_name] += int(in_cell.sum())
+
+        for terrain_name, count in matched_by_name.items():
+            print(
+                f"[EdgeCylinder] terrain-specific radius: terrain={terrain_name}, "
+                f"edges={count}, r={float(overrides[terrain_name])}"
+            )
 
     def disable_visualizer(self):
         if hasattr(self, "_cylinder_visualizer"):

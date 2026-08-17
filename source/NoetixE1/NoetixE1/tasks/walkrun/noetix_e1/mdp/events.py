@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import isaaclab.utils.math as math_utils
+import numpy as np
 import torch
 from isaaclab.actuators import ImplicitActuator
 from isaaclab.assets import Articulation, RigidObject
@@ -235,13 +236,19 @@ def reset_root_state_amp(
     prob_rsi: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     terrain_specific_yaw: dict[str, list[float] | tuple[float, float]] | None = None,
+    terrain_specific_heading_target: dict[str, dict] | None = None,
     terrain_specific_pos_range: dict[str, dict[str, tuple[float, float]]] | None = None,
+    default_motion_files: list[str] | tuple[str, ...] | None = None,
     terrain_specific_motion_files: dict[str, list[str]] | None = None,
     terrain_specific_rsi_excluded_motion_files: dict[str, list[str]] | None = None,
+    terrain_specific_prob_rsi: dict[str, float] | None = None,
+    terrain_specific_joint_vel_range: dict[str, tuple[float, float]] | None = None,
     terrain_specific_motion_level_range: tuple[int, int] | None = None,
     terrain_specific_reset_height_range: dict[str, tuple[float, float]] | None = None,
+    terrain_reset_frames: dict[str, tuple[int, ...]] | None = None,
     terrain_specific_spawn_z_offset: dict[str, float] | None = None,
     terrain_specific_figure8_spawn: dict | None = None,
+    terrain_specific_l_curve_bidirectional_spawn: dict[str, dict] | None = None,
 ):
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
@@ -258,9 +265,48 @@ def reset_root_state_amp(
     ranges = torch.tensor(range_list, device=asset.device)
     rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
 
+    def _sample_joint_velocity_noise(
+        target_env_ids: torch.Tensor,
+        shape: torch.Size | tuple[int, ...],
+    ) -> torch.Tensor:
+        noise = math_utils.sample_uniform(*joint_vel_range, shape, asset.device)
+        if not terrain_specific_joint_vel_range:
+            return noise
+
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
+
+        names_to_cols = get_terrain_type_names_to_col_map(env)
+        terrain_types = env.scene.terrain.terrain_types[target_env_ids]
+        for terrain_name, velocity_range in terrain_specific_joint_vel_range.items():
+            columns = names_to_cols.get(terrain_name, ())
+            if not columns:
+                continue
+            terrain_mask = _terrain_env_mask(
+                terrain_types, columns, len(target_env_ids), asset.device
+            )
+            if terrain_mask.any():
+                noise[terrain_mask] = math_utils.sample_uniform(
+                    *velocity_range,
+                    noise[terrain_mask].shape,
+                    asset.device,
+                )
+        return noise
+
+    if terrain_specific_l_curve_bidirectional_spawn:
+        from .l_railed_platform import L_CURVE_REVERSE_DIRECTION_ATTR
+
+        reverse_direction = getattr(env.unwrapped, L_CURVE_REVERSE_DIRECTION_ATTR, None)
+        if reverse_direction is None:
+            reverse_direction = torch.zeros(env.num_envs, dtype=torch.bool, device=asset.device)
+            setattr(env.unwrapped, L_CURVE_REVERSE_DIRECTION_ATTR, reverse_direction)
+        reverse_direction[env_ids] = False
+
     # Handle terrain-specific configurations (yaw angles and position ranges)
-    if (terrain_specific_yaw is not None and len(terrain_specific_yaw) > 0) or \
-       (terrain_specific_pos_range is not None and len(terrain_specific_pos_range) > 0):
+    if (
+        (terrain_specific_yaw is not None and len(terrain_specific_yaw) > 0)
+        or (terrain_specific_heading_target is not None and len(terrain_specific_heading_target) > 0)
+        or (terrain_specific_pos_range is not None and len(terrain_specific_pos_range) > 0)
+    ):
         from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
         
         env_id_str = str(id(env))
@@ -346,6 +392,124 @@ def reset_root_state_amp(
                 rand_samples[:, 0] = x_samples
                 rand_samples[:, 1] = y_samples
 
+            # Apply heading targets after position sampling so the yaw points
+            # from each selected spawn pose toward its configured target.
+            if terrain_specific_heading_target:
+                for terrain_type, target_cfg in terrain_specific_heading_target.items():
+                    if terrain_type not in terrain_type_names_to_col_map:
+                        continue
+                    if not isinstance(target_cfg, dict):
+                        raise ValueError(
+                            "terrain-specific heading targets must be dictionaries, "
+                            f"got {target_cfg!r} for {terrain_type!r}."
+                        )
+                    if "target_x" not in target_cfg or "target_y_range" not in target_cfg:
+                        raise ValueError(
+                            "terrain-specific heading targets must define target_x "
+                            f"and target_y_range, got {target_cfg!r} for {terrain_type!r}."
+                        )
+
+                    target_y_range = target_cfg["target_y_range"]
+                    if not isinstance(target_y_range, (tuple, list)) or len(target_y_range) != 2:
+                        raise ValueError(
+                            "terrain-specific target_y_range must contain two values, "
+                            f"got {target_y_range!r} for {terrain_type!r}."
+                        )
+                    target_y_low, target_y_high = sorted(float(value) for value in target_y_range)
+
+                    yaw_offset_range = target_cfg.get("yaw_offset_range", (0.0, 0.0))
+                    if not isinstance(yaw_offset_range, (tuple, list)) or len(yaw_offset_range) != 2:
+                        raise ValueError(
+                            "terrain-specific yaw_offset_range must contain two values, "
+                            f"got {yaw_offset_range!r} for {terrain_type!r}."
+                        )
+                    yaw_offset_low, yaw_offset_high = (float(value) for value in yaw_offset_range)
+
+                    is_this_terrain = torch.zeros(len(env_ids), dtype=torch.bool, device=asset.device)
+                    for col_idx in terrain_type_names_to_col_map[terrain_type]:
+                        is_this_terrain |= terrain_types_for_envs == col_idx
+
+                    outside_spawn_y_range = target_cfg.get("outside_spawn_y_range")
+                    if outside_spawn_y_range is not None:
+                        if (
+                            not isinstance(outside_spawn_y_range, (tuple, list))
+                            or len(outside_spawn_y_range) != 2
+                        ):
+                            raise ValueError(
+                                "terrain-specific outside_spawn_y_range must contain two values, "
+                                f"got {outside_spawn_y_range!r} for {terrain_type!r}."
+                            )
+                        central_y_low, central_y_high = sorted(
+                            float(value) for value in outside_spawn_y_range
+                        )
+                        spawn_y = rand_samples[:, 1]
+                        is_this_terrain &= (spawn_y < central_y_low) | (spawn_y > central_y_high)
+                    if not is_this_terrain.any():
+                        continue
+
+                    spawn_x = rand_samples[is_this_terrain, 0]
+                    spawn_y = rand_samples[is_this_terrain, 1]
+                    target_x = torch.full_like(spawn_x, float(target_cfg["target_x"]))
+                    target_y = spawn_y.clamp(target_y_low, target_y_high)
+                    yaw_samples = torch.atan2(target_y - spawn_y, target_x - spawn_x)
+                    yaw_samples += math_utils.sample_uniform(
+                        yaw_offset_low,
+                        yaw_offset_high,
+                        yaw_samples.shape,
+                        device=asset.device,
+                    )
+                    rand_samples[is_this_terrain, 5] = torch.atan2(
+                        torch.sin(yaw_samples), torch.cos(yaw_samples)
+                    )
+
+    if terrain_specific_l_curve_bidirectional_spawn:
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
+        from .l_railed_platform import L_CURVE_REVERSE_DIRECTION_ATTR, l_railed_platform_geometry
+
+        state = _adaptive_terrain_state.get(str(id(env)))
+        if state is not None:
+            names_to_cols = state["terrain_type_names_to_col_map"]
+            terrain_types = env.scene.terrain.terrain_types[env_ids]
+            reverse_direction = getattr(env.unwrapped, L_CURVE_REVERSE_DIRECTION_ATTR)
+            for terrain_type, spawn_cfg in terrain_specific_l_curve_bidirectional_spawn.items():
+                columns = names_to_cols.get(terrain_type, ())
+                if not columns:
+                    continue
+                on_terrain = torch.zeros(len(env_ids), dtype=torch.bool, device=asset.device)
+                for column in columns:
+                    on_terrain |= terrain_types == column
+                reverse_probability = float(spawn_cfg.get("reverse_probability", 0.5))
+                if not 0.0 <= reverse_probability <= 1.0:
+                    raise ValueError("L-curve reverse_probability must be in [0, 1].")
+                reverse_spawn = on_terrain & (
+                    torch.rand(len(env_ids), device=asset.device) < reverse_probability
+                )
+                reverse_direction[env_ids[on_terrain]] = reverse_spawn[on_terrain]
+                count = int(reverse_spawn.sum().item())
+                if count == 0:
+                    continue
+                geometry = l_railed_platform_geometry(
+                    env, spawn_cfg.get("sub_terrain_key", terrain_type)
+                )
+                longitudinal = spawn_cfg.get("longitudinal_offset_range", (-0.1, 0.3))
+                lateral = spawn_cfg.get("lateral_offset_range", (-0.1, 0.1))
+                yaw_jitter = spawn_cfg.get(
+                    "yaw_jitter_range", (-0.2617993877991494, 0.2617993877991494)
+                )
+                longitudinal_sample = math_utils.sample_uniform(
+                    *longitudinal, (count,), device=asset.device
+                )
+                lateral_sample = math_utils.sample_uniform(*lateral, (count,), device=asset.device)
+                yaw_sample = math_utils.sample_uniform(*yaw_jitter, (count,), device=asset.device)
+                rand_samples[reverse_spawn, 0] = geometry.corner_x_m + lateral_sample
+                rand_samples[reverse_spawn, 1] = (
+                    geometry.route_end_y_m + geometry.route_start_x_m - longitudinal_sample
+                )
+                reverse_yaw = -0.5 * torch.pi + yaw_sample
+                rand_samples[reverse_spawn, 5] = torch.atan2(
+                    torch.sin(reverse_yaw), torch.cos(reverse_yaw)
+                )
+
     if _figure8_spawn_cfg_active(terrain_specific_figure8_spawn):
         from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state
 
@@ -362,16 +526,65 @@ def reset_root_state_amp(
                 terrain_specific_figure8_spawn,
             )
 
-    if (
-        env.unwrapped.motion_loader is not None
-        and reference_state_initialization
-        and prob_rsi > torch.rand(1, dtype=torch.float32, device=env.device)
-    ):
+    rsi_draw = torch.rand(1, dtype=torch.float32, device=env.device)
+    rsi_probabilities = torch.full(
+        (len(env_ids),), float(prob_rsi), dtype=torch.float32, device=env.device
+    )
+    if terrain_specific_prob_rsi:
+        from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
+
+        terrain_names_to_cols = get_terrain_type_names_to_col_map(env)
+        terrain_types_for_envs = env.scene.terrain.terrain_types[env_ids]
+        for terrain_name, terrain_prob_rsi in terrain_specific_prob_rsi.items():
+            terrain_prob_rsi = float(terrain_prob_rsi)
+            if not 0.0 <= terrain_prob_rsi <= 1.0:
+                raise ValueError(
+                    f"terrain-specific prob_rsi for '{terrain_name}' must be in [0, 1], got {terrain_prob_rsi}"
+                )
+            columns = terrain_names_to_cols.get(terrain_name, ())
+            if columns:
+                terrain_mask = _terrain_env_mask(
+                    terrain_types_for_envs, columns, len(env_ids), asset.device
+                )
+                rsi_probabilities[terrain_mask] = terrain_prob_rsi
+    rsi_mask = rsi_draw < rsi_probabilities
+
+    if env.unwrapped.motion_loader is not None and reference_state_initialization and rsi_mask.any():
+        motion_loader = env.unwrapped.motion_loader
+
+        def _sample_full_frames_at_reset_keyframes(
+            num_frames: int,
+            allowed_traj_idxs: tuple[int, ...] | list[int],
+            terrain_name: str,
+        ) -> torch.Tensor:
+            keyframes = (terrain_reset_frames or {}).get(terrain_name, (0,)) or (0,)
+            trajectory_pool = np.asarray(allowed_traj_idxs, dtype=np.int64)
+            trajectory_indices = np.random.choice(trajectory_pool, size=num_frames, replace=True)
+            frame_indices = np.random.choice(
+                np.asarray(keyframes, dtype=np.int64), size=num_frames, replace=True
+            )
+            max_frame_indices = np.maximum(
+                motion_loader.trajectory_num_frames[trajectory_indices].astype(np.int64) - 1,
+                0,
+            )
+            frame_indices = np.minimum(frame_indices, max_frame_indices)
+            frame_times = (
+                frame_indices.astype(np.float32)
+                * motion_loader.trajectory_frame_durations[trajectory_indices].astype(np.float32)
+            )
+            return motion_loader.get_full_frame_at_time_batch(trajectory_indices, frame_times)
+
         # get frames of amp motions (optionally from terrain-specific motion files)
         use_full_motion_state = torch.zeros(len(env_ids), dtype=torch.bool, device=env.device)
         terrain_specific_motion_files = terrain_specific_motion_files or {}
         terrain_specific_rsi_excluded_motion_files = terrain_specific_rsi_excluded_motion_files or {}
         motion_files_list = list(getattr(env.unwrapped.cfg, "motion_files", []) or [])
+        default_motion_indices: tuple[int, ...] | None = None
+        if default_motion_files:
+            missing_default_files = [path for path in default_motion_files if path not in motion_files_list]
+            if missing_default_files:
+                raise ValueError(f"Unknown default RSI motion files: {missing_default_files}")
+            default_motion_indices = tuple(motion_files_list.index(path) for path in default_motion_files)
         has_terrain_specific_rsi_sampling = bool(
             terrain_specific_motion_files or terrain_specific_rsi_excluded_motion_files
         )
@@ -421,9 +634,13 @@ def reset_root_state_amp(
                     (len(env_ids), frame_dim), device=env.device, dtype=env.motion_loader.preloaded_states.dtype
                 )
                 all_trajectory_indices = tuple(range(len(motion_files_list)))
+                default_indices = default_motion_indices or all_trajectory_indices
                 for tname, local_indices in groups.items():
-                    rsi_allowed = terrain_to_rsi_allowed_indices.get(tname, all_trajectory_indices)
-                    excluded = set(all_trajectory_indices) - set(rsi_allowed)
+                    terrain_allowed = terrain_to_rsi_allowed_indices.get(tname, all_trajectory_indices)
+                    rsi_allowed = tuple(index for index in default_indices if index in terrain_allowed)
+                    if not rsi_allowed:
+                        raise ValueError(f"No default RSI motions remain available for terrain '{tname}'.")
+                    excluded = set(all_trajectory_indices) - set(terrain_allowed)
 
                     full_state_allowed = terrain_to_indices.get(tname) if tname else None
                     if full_state_allowed is not None:
@@ -439,8 +656,8 @@ def reset_root_state_amp(
                         in_range_where = torch.where(level_ok_sub)[0]
                         out_range_where = torch.where(~level_ok_sub)[0]
                         if in_range_where.numel() > 0:
-                            batch_in = env.motion_loader.get_full_frame_batch(
-                                in_range_where.numel(), allowed_traj_idxs=full_state_allowed
+                            batch_in = _sample_full_frames_at_reset_keyframes(
+                                int(in_range_where.numel()), full_state_allowed, tname
                             )
                             for j, pos in enumerate(in_range_where):
                                 li = local_indices[pos.item()]
@@ -462,9 +679,15 @@ def reset_root_state_amp(
             else:
                 if terrain_specific_rsi_excluded_motion_files:
                     raise RuntimeError("Cannot apply terrain-specific RSI motion exclusions without terrain mapping.")
-                frames = env.motion_loader.get_full_frame_batch(len(env_ids))
+                frames = env.motion_loader.get_full_frame_batch(
+                    len(env_ids), allowed_traj_idxs=default_motion_indices
+                )
         else:
-            frames = env.motion_loader.get_full_frame_batch(len(env_ids))
+            frames = env.motion_loader.get_full_frame_batch(
+                len(env_ids), allowed_traj_idxs=default_motion_indices
+            )
+
+        use_full_motion_state &= rsi_mask
 
         # get root state of amp motions (raw: motion frame, no origin)
         raw_amp_positions = env.unwrapped.motion_loader_class.get_root_pos_batch(frames)
@@ -534,6 +757,46 @@ def reset_root_state_amp(
         joint_vel = env.unwrapped.motion_loader_class.get_joint_vel_batch(frames)[
             ..., env.unwrapped.motion_loader.joint_mapping["motion2sim"]
         ]
+
+        # Terrain-specific RSI probabilities may leave part of this reset batch on the normal reset path.
+        no_rsi_mask = ~rsi_mask
+        if no_rsi_mask.any():
+            no_rsi_env_ids = env_ids[no_rsi_mask]
+            root_states = asset.data.default_root_state[no_rsi_env_ids].clone()
+            positions[no_rsi_mask] = (
+                root_states[:, 0:3]
+                + env.scene.env_origins[no_rsi_env_ids]
+                + rand_samples[no_rsi_mask, 0:3]
+            )
+            orientations_delta = math_utils.quat_from_euler_xyz(
+                rand_samples[no_rsi_mask, 3],
+                rand_samples[no_rsi_mask, 4],
+                rand_samples[no_rsi_mask, 5],
+            )
+            orientations[no_rsi_mask] = math_utils.quat_mul(
+                root_states[:, 3:7], orientations_delta
+            )
+            velocity_ranges = torch.tensor(
+                [root_vel_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]],
+                device=asset.device,
+            )
+            velocity_noise = math_utils.sample_uniform(
+                velocity_ranges[:, 0],
+                velocity_ranges[:, 1],
+                (int(no_rsi_mask.sum().item()), 6),
+                device=asset.device,
+            )
+            velocities[no_rsi_mask] = root_states[:, 7:13] + velocity_noise
+            default_joint_pos = asset.data.default_joint_pos[no_rsi_env_ids][:, asset_cfg.joint_ids].clone()
+            default_joint_vel = asset.data.default_joint_vel[no_rsi_env_ids][:, asset_cfg.joint_ids].clone()
+            default_joint_pos += math_utils.sample_uniform(
+                *joint_pos_range, default_joint_pos.shape, default_joint_pos.device
+            )
+            default_joint_vel += _sample_joint_velocity_noise(
+                no_rsi_env_ids, default_joint_vel.shape
+            )
+            joint_pos[no_rsi_mask] = default_joint_pos
+            joint_vel[no_rsi_mask] = default_joint_vel
     else:
         # get default root state
         root_states = asset.data.default_root_state[env_ids].clone()
@@ -562,7 +825,7 @@ def reset_root_state_amp(
 
         # bias these values randomly
         joint_pos += math_utils.sample_uniform(*joint_pos_range, joint_pos.shape, joint_pos.device)
-        joint_vel += math_utils.sample_uniform(*joint_vel_range, joint_vel.shape, joint_vel.device)
+        joint_vel += _sample_joint_velocity_noise(env_ids, joint_vel.shape)
 
     if _figure8_spawn_cfg_active(terrain_specific_figure8_spawn):
         from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import _adaptive_terrain_state

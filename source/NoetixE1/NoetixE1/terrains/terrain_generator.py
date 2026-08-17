@@ -16,6 +16,7 @@ class FiledTerrainGenerator(TerrainGenerator):
         # Access the i-th row, j-th column subterrain config by
         # self._subterrain_specific_cfgs[i*num_cols + j]
         self._subterrain_specific_cfgs: list[SubTerrainBaseCfg] = []
+        self._subterrain_keys: list[str] = []
         super().__init__(cfg, device)
 
     def _get_terrain_mesh(self, difficulty: float, cfg: SubTerrainBaseCfg):
@@ -23,6 +24,8 @@ class FiledTerrainGenerator(TerrainGenerator):
         for each subterrain.
         """
         mesh, origin = super()._get_terrain_mesh(difficulty, cfg)
+        subterrain_key = next((key for key, sub_cfg in self.cfg.sub_terrains.items() if sub_cfg is cfg), "")
+        self._subterrain_keys.append(subterrain_key)
         # >>> NOTE: This code snippet is copied from the super implementation because they copied the cfg
         # but we need to store the modified cfg for each subterrain.
         cfg = cfg.copy()

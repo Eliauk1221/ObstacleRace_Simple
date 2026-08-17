@@ -5,6 +5,7 @@
 from isaaclab.terrains import *
 
 from .terrain_generator_cfg import *
+from .trimesh import MeshLRailedPlatformTerrainCfg, l_railed_platform_terrain
 from .custom_terrain import (
     HfContinuousWaveSlopesTerrainCfg,
     HfDoubleFramePlatformTerrainCfg,

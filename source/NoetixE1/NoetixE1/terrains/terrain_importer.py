@@ -5,6 +5,7 @@ import torch
 import trimesh
 from typing import TYPE_CHECKING
 
+import isaaclab.sim as sim_utils
 from isaaclab.terrains import SubTerrainBaseCfg, TerrainGenerator
 from isaaclab.terrains import TerrainImporter as TerrainImporterBase
 from isaaclab.utils.timer import Timer
@@ -12,6 +13,13 @@ from isaaclab.utils.timer import Timer
 if TYPE_CHECKING:
     from .terrain_importer_cfg import TerrainImporterCfg
     from .virtual_obstacle import VirtualObstacleBase
+
+
+def _bind_virtual_obstacle_terrain_generator(virtual_obstacle, terrain_generator) -> None:
+    """Bind generator metadata to analytical virtual obstacles that require it."""
+    bind = getattr(virtual_obstacle, "bind_terrain_generator", None)
+    if callable(bind):
+        bind(terrain_generator)
 
 
 class TerrainImporter(TerrainImporterBase):
@@ -26,6 +34,29 @@ class TerrainImporter(TerrainImporterBase):
         if cfg.terrain_type == "hacked_generator":
             self._hacked_terrain_type = "hacked_generator"
             cfg.terrain_type = "plane"
+            super().__init__(cfg)
+            return
+
+        # Isaac Lab keeps the generator local in this branch. Retain it so metadata-backed virtual obstacles can bind.
+        if cfg.terrain_type == "generator":
+            cfg.validate()
+            self.cfg = cfg
+            self.device = sim_utils.SimulationContext.instance().device  # type: ignore
+            self.terrain_prim_paths = []
+            self.terrain_origins = None
+            self.env_origins = None
+            self._terrain_flat_patches = {}
+            if self.cfg.terrain_generator is None:
+                raise ValueError("Input terrain type is 'generator' but no value provided for 'terrain_generator'.")
+            self.terrain_generator = self.cfg.terrain_generator.class_type(
+                cfg=self.cfg.terrain_generator, device=self.device
+            )
+            self.import_mesh("terrain", self.terrain_generator.terrain_mesh)
+            self.configure_env_origins(self.terrain_generator.terrain_origins)
+            self._terrain_flat_patches = self.terrain_generator.flat_patches
+            self.set_debug_vis(self.cfg.debug_vis)
+            return
+
         super().__init__(cfg)
 
     @property
@@ -64,6 +95,9 @@ class TerrainImporter(TerrainImporterBase):
         # Generate virtual obstacles based on the imported mesh.
         # NOTE: generate virtual obstacle first because it might modify the mesh.
         for name, virtual_obstacle in self._virtual_obstacles.items():
+            _bind_virtual_obstacle_terrain_generator(
+                virtual_obstacle, getattr(self, "terrain_generator", None)
+            )
             with Timer(f"Generate virtual obstacle {name}"):
                 virtual_obstacle.generate(mesh, device=self.device)
 

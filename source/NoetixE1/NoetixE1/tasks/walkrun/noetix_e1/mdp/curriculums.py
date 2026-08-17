@@ -597,6 +597,11 @@ def terrain_levels_vel_with_termination(
     s_curve_terrain_types: tuple[str, ...] | list[str] = ("s_curve",),
     s_curve_reach_end_term: str | tuple[str, ...] | list[str] = "s_curve_reach_end",
     s_curve_half_local_x: float = 0.0,
+    l_curve_terrain_types: tuple[str, ...] | list[str] = (),
+    l_curve_reach_end_term: str = "l_curve_reach_end",
+    l_curve_sub_terrain_key: str = "l_curve",
+    l_curve_turn_radius_ratio: float = 0.4,
+    l_curve_bidirectional: bool = False,
     continuous_wave_terrain_types: tuple[str, ...] | list[str] = (),
     continuous_wave_finish_x_m: float = 3.8,
     symmetric_slope_terrain_types: tuple[str, ...] | list[str] = (),
@@ -705,6 +710,7 @@ def terrain_levels_vel_with_termination(
         ),
     )
     is_s_curve = _env_ids_on_terrain_types(env, env_ids_tensor, s_curve_terrain_types)
+    is_l_curve = _env_ids_on_terrain_types(env, env_ids_tensor, l_curve_terrain_types)
     is_continuous_wave = _env_ids_on_terrain_types(
         env, env_ids_tensor, continuous_wave_terrain_types
     )
@@ -718,6 +724,7 @@ def terrain_levels_vel_with_termination(
         is_figure8
         | is_interlaced_approach
         | is_s_curve
+        | is_l_curve
         | is_continuous_wave
         | is_symmetric_slope
         | is_braking_slope
@@ -844,6 +851,29 @@ def terrain_levels_vel_with_termination(
         s_curve_move_down = ~reached_end & ~passed_half
         move_up = torch.where(is_s_curve, s_curve_move_up, move_up)
         move_down = torch.where(is_s_curve, s_curve_move_down, move_down)
+
+    if is_l_curve.any():
+        from .l_railed_platform import l_curve_path_state
+
+        local_indices = torch.where(is_l_curve)[0]
+        l_env_ids = env_ids_tensor[local_indices]
+        try:
+            reached_end = env.termination_manager.get_term(l_curve_reach_end_term)[l_env_ids]
+        except KeyError:
+            reached_end = torch.zeros(len(l_env_ids), dtype=torch.bool, device=env.device)
+        local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+        path_state, _ = l_curve_path_state(
+            env,
+            local_xy,
+            sub_terrain_key=l_curve_sub_terrain_key,
+            turn_radius_ratio=l_curve_turn_radius_ratio,
+            bidirectional=l_curve_bidirectional,
+        )
+        passed_half = (
+            path_state.progress_m[l_env_ids] >= path_state.arc_mid_progress_m[l_env_ids]
+        )
+        move_up[local_indices] = reached_end
+        move_down[local_indices] = ~reached_end & ~passed_half
 
     # update terrain levels
     terrain.update_env_origins(env_ids, move_up, move_down)

@@ -478,7 +478,7 @@ class HfCrossSteppingStonesTerrainCfg(HfTerrainBaseCfg):
 class HfHurdleTerrainCfg(HfTerrainBaseCfg):
     """Configuration for a height field terrain with nested "回字形" (ring-shaped) hurdles.
 
-    Creates exactly 3 nested ring-shaped hurdle structures (一环套一环), uniformly distributed.
+    Creates nested ring-shaped hurdle structures (一环套一环).
     The structure from outside to inside:
     - Outer border (solid ground at height 0)
     - Ground ring 1 (solid ground at height 0)
@@ -491,13 +491,23 @@ class HfHurdleTerrainCfg(HfTerrainBaseCfg):
 
     Unlike gaps which are depressions, hurdles are raised barriers that the robot must step over.
     The hurdle height increases with difficulty, while the hurdle widths are configurable.
-    The 3 hurdles are uniformly distributed from the platform to the terrain edge.
+    By default, the hurdles are uniformly distributed from the platform to the terrain edge.
     """
 
     function = custom_terrains.hurdle_terrain
 
     platform_width: float = 1.0
     """The width of the square platform at the center (in m). Defaults to 1.0."""
+
+    num_hurdles: int = 3
+    """Number of concentric hurdle rings. Defaults to 3."""
+
+    first_hurdle_distance: float | None = None
+    """Optional distance from the terrain center to the first hurdle's inner edge (in m).
+
+    When set, the first gap ends at this distance. Remaining hurdle rings are distributed
+    uniformly between the first hurdle and the terrain edge.
+    """
 
     hurdle_height_range: tuple[float, float] = (0.05, 0.3)
     """The minimum and maximum height of hurdles (in m). Defaults to (0.05, 0.3).
@@ -506,11 +516,18 @@ class HfHurdleTerrainCfg(HfTerrainBaseCfg):
     the second value is the height at difficulty=1.
     """
 
-    hurdle_width_pixels: int | tuple[int, int, int] = 3
+    hurdle_heights_m: tuple[float, ...] | None = None
+    """Optional fixed heights ordered from the innermost ring to the outermost ring.
+
+    When set, these values override ``hurdle_height_range`` and must contain one height per hurdle.
+    Configurations that leave this field as ``None`` retain the existing shared curriculum-height behavior.
+    """
+
+    hurdle_width_pixels: int | tuple[int, ...] = 3
     """The width of each hurdle ring in pixels (horizontal_scale multiples). Defaults to 3.
     
-    If a single int is provided, all 3 hurdles have the same width.
-    If a tuple (width1, width2, width3) is provided, each hurdle can have a different width.
+    If a single int is provided, all hurdles have the same width.
+    If a tuple is provided, its length must equal ``num_hurdles``.
     Hurdle widths are fixed and do not vary with difficulty.
     
     Example:

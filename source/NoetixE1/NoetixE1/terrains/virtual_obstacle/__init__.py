@@ -5,4 +5,5 @@ from .edge_cylinder_cfg import (
     RansacEdgeCylinderCfg,
     RayEdgeCylinderCfg,
 )
+from .square_ring_wall_cfg import SquareRingWallOuterBandVirtualObstacleCfg
 from .virtual_obstacle_base import VirtualObstacleBase, VirtualObstacleCfg

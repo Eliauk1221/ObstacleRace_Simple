@@ -14,6 +14,11 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from NoetixE1.sensors.volume_points import VolumePoints
+from .l_railed_platform import (
+    l_curve_corner_blend,
+    l_curve_path_state,
+    l_curve_travel_direction_sign,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -33,6 +38,7 @@ def track_lin_x_speed_linear(
     env: ManagerBasedRLEnv,
     command_name: str = "base_velocity",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
@@ -57,7 +63,14 @@ def track_lin_x_speed_linear(
 
     command_weight = torch.clamp(abs_cmd_x / 1.5, min=0.2, max=1.0)
     reward = reward * command_weight
-    return torch.where(zero_cmd, torch.zeros_like(reward), reward)
+    reward = torch.where(zero_cmd, torch.zeros_like(reward), reward)
+    if skip_terrain_types:
+        reward = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, reward.device),
+            torch.zeros_like(reward),
+            reward,
+        )
+    return reward
 
 
 def track_lin_vel_xy_yaw_frame_exp(
@@ -328,6 +341,19 @@ def feet_air_time_positive_biped(
     return reward
 
 
+def air_time_variance_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize variance between the feet's last air and contact durations."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    if not contact_sensor.cfg.track_air_time:
+        raise RuntimeError("Activate ContactSensor's track_air_time!")
+
+    last_air_time = contact_sensor.data.last_air_time[:, sensor_cfg.body_ids]
+    last_contact_time = contact_sensor.data.last_contact_time[:, sensor_cfg.body_ids]
+    return torch.var(torch.clamp(last_air_time, max=0.5), dim=1) + torch.var(
+        torch.clamp(last_contact_time, max=0.5), dim=1
+    )
+
+
 def feet_slide(
     env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
@@ -467,7 +493,6 @@ def feet_orientation_contact(
         asset_cfg: Configuration for the robot asset and body IDs.
         terrain_types: Optional tuple of terrain type names. If provided, only applies penalty
             to environments on these terrain types. If None or empty, applies to all terrains.
-
     Returns:
         Penalty tensor of shape (num_envs,) with the orientation penalty per environment.
     """
@@ -553,6 +578,17 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     net_contact_forces = contact_sensor.data.net_forces_w_history
     is_contact = torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold
     return torch.sum(is_contact, dim=1)
+
+
+def undesired_contacts_on_terrain(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    sensor_cfg: SceneEntityCfg,
+    terrain_types: tuple[str, ...],
+) -> torch.Tensor:
+    """Count undesired contacts only on the selected terrain types."""
+    contacts = undesired_contacts(env, threshold, sensor_cfg)
+    return contacts * _terrain_type_mask(env, terrain_types, contacts.device).float()
 
 
 def _high_speed_command_mask(
@@ -732,6 +768,179 @@ def lin_vel_dir_reward(
             punish,
         )
     return punish
+
+
+def stairs_outward_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    min_forward_command: float = 0.1,
+    cap_by_command: bool = True,
+    max_outward_speed: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward planar velocity directed away from the stair tile's center platform."""
+    if min_forward_command < 0.0:
+        raise ValueError(f"min_forward_command must be non-negative, got {min_forward_command}.")
+    if max_outward_speed <= 0.0:
+        raise ValueError(f"max_outward_speed must be positive, got {max_outward_speed}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command("base_velocity")
+    active = _terrain_type_mask(env, terrain_types, asset.device) & (
+        command[:, 0] > float(min_forward_command)
+    )
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    radial_distance = torch.norm(local_xy, dim=1, keepdim=True)
+    outward_direction = local_xy / torch.clamp(radial_distance, min=1.0e-6)
+    outward_speed = torch.sum(asset.data.root_lin_vel_w[:, :2] * outward_direction, dim=1).clamp(min=0.0)
+
+    speed_cap = torch.full_like(outward_speed, float(max_outward_speed))
+    if cap_by_command:
+        speed_cap = torch.minimum(speed_cap, command[:, 0].clamp(min=0.0))
+    reward = torch.minimum(outward_speed, speed_cap)
+    return reward * active.float()
+
+
+def stair_large_step_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    sensor_cfg: SceneEntityCfg,
+    terrain_types: tuple[str, ...] = ("stairs_down", "spiral_stairs_down"),
+    min_forward_command: float = 0.1,
+    stable_contact_time: float = 0.04,
+    max_radial_step_distance: float = 0.70,
+    min_support_height_drop: float = 0.03,
+    excess_distance_scale: float = 0.20,
+) -> torch.Tensor:
+    """Penalize a touchdown far below and outward from the other foot's last support."""
+    if len(asset_cfg.body_ids) != 2 or len(sensor_cfg.body_ids) != 2:
+        raise ValueError("stair_large_step_penalty requires exactly two foot bodies.")
+    if min_forward_command < 0.0:
+        raise ValueError(f"min_forward_command must be non-negative, got {min_forward_command}.")
+    if stable_contact_time <= 0.0:
+        raise ValueError(f"stable_contact_time must be positive, got {stable_contact_time}.")
+    if max_radial_step_distance <= 0.0:
+        raise ValueError(
+            f"max_radial_step_distance must be positive, got {max_radial_step_distance}."
+        )
+    if min_support_height_drop < 0.0:
+        raise ValueError(
+            "min_support_height_drop must be non-negative, "
+            f"got {min_support_height_drop}."
+        )
+    if excess_distance_scale <= 0.0:
+        raise ValueError(f"excess_distance_scale must be positive, got {excess_distance_scale}.")
+    if env.step_dt <= 0.0:
+        raise ValueError(f"env.step_dt must be positive, got {env.step_dt}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    env_u = env.unwrapped
+    foot_body_ids = getattr(env_u, "_foothold_body_ids", asset_cfg.body_ids)
+    foot_contact_body_ids = getattr(
+        env_u, "_foothold_contact_body_ids", sensor_cfg.body_ids
+    )
+    feet_pos_w = asset.data.body_pos_w[:, foot_body_ids, :]
+    foot_radius = torch.norm(
+        feet_pos_w[..., :2] - env.scene.env_origins[:, None, :2], dim=-1
+    )
+    foot_height = feet_pos_w[..., 2]
+
+    cache_radius = getattr(env_u, "_stair_last_support_radius", None)
+    cache_height = getattr(env_u, "_stair_last_support_height", None)
+    cache_valid = getattr(env_u, "_stair_last_support_valid", None)
+    cache_shape = (env.num_envs, 2)
+    if (
+        cache_radius is None
+        or cache_height is None
+        or cache_valid is None
+        or cache_radius.shape != cache_shape
+        or cache_height.shape != cache_shape
+        or cache_valid.shape != cache_shape
+        or cache_radius.device != foot_radius.device
+        or cache_height.device != foot_height.device
+        or cache_valid.device != foot_radius.device
+    ):
+        cache_radius = torch.zeros(cache_shape, device=foot_radius.device, dtype=foot_radius.dtype)
+        cache_height = torch.zeros(cache_shape, device=foot_height.device, dtype=foot_height.dtype)
+        cache_valid = torch.zeros(cache_shape, device=foot_radius.device, dtype=torch.bool)
+        env_u._stair_last_support_radius = cache_radius
+        env_u._stair_last_support_height = cache_height
+        env_u._stair_last_support_valid = cache_valid
+
+    reset = env.episode_length_buf <= 1
+    cache_valid[reset] = False
+
+    # Keep a pre-touchdown snapshot so simultaneous touchdowns cannot update each other's reference.
+    previous_radius = cache_radius.clone()
+    previous_height = cache_height.clone()
+    previous_valid = cache_valid.clone()
+
+    foothold_events = env.extras.get("foothold_events", {})
+    touchdown = foothold_events.get("touchdown")
+    touchdown_xy_w = foothold_events.get("touchdown_xy_w")
+    if touchdown is None or touchdown_xy_w is None:
+        touchdown = torch.zeros(cache_shape, dtype=torch.bool, device=foot_radius.device)
+        touchdown_radius = foot_radius
+    else:
+        touchdown = touchdown.to(device=foot_radius.device, dtype=torch.bool)
+        if touchdown.shape != cache_shape or touchdown_xy_w.shape != (*cache_shape, 2):
+            raise ValueError(
+                "foothold touchdown events must have shapes "
+                f"{cache_shape} and {(*cache_shape, 2)}, got "
+                f"{tuple(touchdown.shape)} and {tuple(touchdown_xy_w.shape)}."
+            )
+        touchdown_radius = torch.norm(
+            touchdown_xy_w.to(device=foot_radius.device) - env.scene.env_origins[:, None, :2], dim=-1
+        )
+
+    other = torch.tensor([1, 0], device=foot_radius.device)
+    radial_advance = touchdown_radius - previous_radius[:, other]
+    support_height_drop = previous_height[:, other] - foot_height
+    command = env.command_manager.get_command("base_velocity")
+    active_env = _terrain_type_mask(env, terrain_types, asset.device) & (
+        command[:, 0] > float(min_forward_command)
+    )
+    eligible = (
+        touchdown
+        & previous_valid[:, other]
+        & active_env[:, None]
+        & (support_height_drop > float(min_support_height_drop))
+    )
+    severity = torch.clamp(
+        (radial_advance - float(max_radial_step_distance)) / float(excess_distance_scale),
+        min=0.0,
+        max=1.0,
+    )
+    triggered = eligible & (radial_advance > float(max_radial_step_distance))
+    event_penalty = torch.max(severity * triggered.float(), dim=1).values
+
+    stable_support = (
+        contact_sensor.data.current_contact_time[:, foot_contact_body_ids]
+        >= float(stable_contact_time)
+    )
+    cache_radius.copy_(torch.where(stable_support, foot_radius, cache_radius))
+    cache_height.copy_(torch.where(stable_support, foot_height, cache_height))
+    cache_valid |= stable_support
+
+    eligible_count = eligible.sum()
+    env.extras.setdefault("log", {})
+    env.extras["log"]["Stairs/large_step_trigger_rate"] = (
+        triggered.sum().float() / torch.clamp(eligible_count, min=1).float()
+    ).detach()
+    env.extras["log"]["Stairs/large_step_radial_advance"] = torch.where(
+        triggered, radial_advance, torch.zeros_like(radial_advance)
+    ).sum().div(torch.clamp(triggered.sum(), min=1)).detach()
+    env.extras["log"]["Stairs/large_step_height_drop"] = torch.where(
+        triggered, support_height_drop, torch.zeros_like(support_height_drop)
+    ).sum().div(torch.clamp(triggered.sum(), min=1)).detach()
+    env.extras["log"]["Stairs/large_step_event_penalty"] = event_penalty.mean().detach()
+
+    # RewardManager multiplies by step_dt; cancel it for this one-frame touchdown event.
+    return event_penalty / float(env.step_dt)
 
 
 def feet_unhold_reward(
@@ -1068,6 +1277,75 @@ def volume_points_penetration(
         punish = punish * is_desired_terrain.float()
 
     return punish
+
+
+def _volume_points_penetration_depth(
+    volume_sensor: VolumePoints,
+    virtual_obstacle_keys: tuple[str, ...] | None,
+) -> torch.Tensor:
+    """Return per-point penetration depths from all or selected virtual obstacles."""
+    if virtual_obstacle_keys is None:
+        return torch.norm(volume_sensor.data.penetration_offset.flatten(1, 2), dim=-1)
+
+    points_pos_w = volume_sensor.data.points_pos_w
+    num_envs, num_bodies, num_points, _ = points_pos_w.shape
+    flat_points = points_pos_w.reshape(num_envs * num_bodies * num_points, 3)
+    max_depth = torch.zeros(flat_points.shape[0], device=flat_points.device, dtype=flat_points.dtype)
+    for key in virtual_obstacle_keys:
+        virtual_obstacle = volume_sensor._virtual_obstacles.get(key)
+        if virtual_obstacle is None:
+            raise KeyError(f"Volume-point virtual obstacle is not registered: {key!r}.")
+        penetration_offset = virtual_obstacle.get_points_penetration_offset(flat_points)
+        max_depth = torch.maximum(max_depth, torch.norm(penetration_offset, dim=-1))
+    return max_depth.reshape(num_envs, num_bodies * num_points)
+
+
+def volume_points_penetration_depth_exp(
+    env: ManagerBasedRLEnv,
+    depth_scale: float = 0.01,
+    sensor_cfg: SceneEntityCfg | None = None,
+    sensor_cfgs: tuple[SceneEntityCfg, ...] | list[SceneEntityCfg] | None = None,
+    sensor_names: tuple[str, ...] | list[str] | str | None = None,
+    tolerance: float = 0.0,
+    terrain_types: tuple[str, ...] | None = None,
+    virtual_obstacle_keys: tuple[str, ...] | None = None,
+    max_exponent: float = 20.0,
+) -> torch.Tensor:
+    """Exponentially penalize selected virtual-obstacle penetration depth without velocity weighting."""
+    if sensor_cfgs is None:
+        if sensor_names is not None:
+            if isinstance(sensor_names, str):
+                sensor_names = (sensor_names,)
+            sensor_cfgs = tuple(SceneEntityCfg(name) for name in sensor_names)
+        elif sensor_cfg is not None:
+            sensor_cfgs = (sensor_cfg,)
+        else:
+            raise ValueError("One of sensor_cfg, sensor_cfgs, or sensor_names must be provided.")
+    if len(sensor_cfgs) == 0:
+        raise ValueError("At least one volume-point sensor must be provided.")
+    if depth_scale <= 0.0:
+        raise ValueError(f"depth_scale must be positive, got {depth_scale}.")
+    if max_exponent <= 0.0:
+        raise ValueError(f"max_exponent must be positive, got {max_exponent}.")
+
+    total_penalty = None
+    for sensor_cfg_i in sensor_cfgs:
+        volume_sensor: VolumePoints = env.scene.sensors[sensor_cfg_i.name]
+        penetration_depth = _volume_points_penetration_depth(volume_sensor, virtual_obstacle_keys)
+        in_obstacle = penetration_depth > tolerance
+        exponent = torch.clamp(
+            penetration_depth / float(depth_scale), max=float(max_exponent)
+        )
+        penalty = torch.sum(
+            (torch.exp(exponent) - 1.0) * in_obstacle.float(), dim=-1
+        )
+        total_penalty = penalty if total_penalty is None else total_penalty + penalty
+
+    if terrain_types:
+        total_penalty = total_penalty * _terrain_type_mask(
+            env, terrain_types, total_penalty.device
+        ).float()
+    return total_penalty
 
 
 def volume_points_penetration_novel(
@@ -1968,6 +2246,143 @@ def _s_curve_lookahead_tangent(
     return tangents[lookahead_idx]
 
 
+def curve_upgrade_entry_center_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("curve_upgrade",),
+    local_x_range: tuple[float, float] = (0.5, 1.0),
+    local_y_range: tuple[float, float] = (-3.55, -2.85),
+    unguided_center_y_range: tuple[float, float] | None = None,
+    target_xy: tuple[float, float] = (0.0, -3.2),
+    max_progress_speed: float = 2.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward velocity toward the entrance, optionally outside a central strip."""
+    x_low, x_high = (float(value) for value in local_x_range)
+    y_low, y_high = (float(value) for value in local_y_range)
+    if x_low > x_high:
+        raise ValueError(f"local_x_range must be ordered, got {local_x_range}.")
+    if y_low > y_high:
+        raise ValueError(f"local_y_range must be ordered, got {local_y_range}.")
+    if unguided_center_y_range is not None:
+        center_y_low, center_y_high = (float(value) for value in unguided_center_y_range)
+        if center_y_low > center_y_high:
+            raise ValueError(
+                "unguided_center_y_range must be ordered, got "
+                f"{unguided_center_y_range}."
+            )
+        if center_y_low < y_low or center_y_high > y_high:
+            raise ValueError(
+                "unguided_center_y_range must lie within local_y_range, got "
+                f"{unguided_center_y_range} and {local_y_range}."
+            )
+    if max_progress_speed <= 0.0:
+        raise ValueError(f"max_progress_speed must be positive, got {max_progress_speed}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    target = torch.tensor(target_xy, dtype=local_xy.dtype, device=local_xy.device)
+    target_delta = target.unsqueeze(0) - local_xy
+    target_direction = target_delta / torch.clamp(
+        torch.norm(target_delta, dim=1, keepdim=True), min=1.0e-6
+    )
+    progress_speed = torch.sum(
+        asset.data.root_lin_vel_w[:, :2] * target_direction, dim=1
+    ).clamp(min=0.0, max=float(max_progress_speed))
+
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= (local_xy[:, 0] >= x_low) & (local_xy[:, 0] <= x_high)
+    active &= (local_xy[:, 1] >= y_low) & (local_xy[:, 1] <= y_high)
+    if unguided_center_y_range is not None:
+        active &= (local_xy[:, 1] < center_y_low) | (local_xy[:, 1] > center_y_high)
+    return progress_speed * active.float()
+
+
+def s_curve_path_speed_linear_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("s_curve",),
+    high_speed_threshold: float = 1.0,
+    samples_per_semicircle: int = 64,
+    inward_tangent_bias_deg: float = 0.0,
+    entry_local_x_range: tuple[float, float] = (0.25, 1.25),
+    entry_local_y_range: tuple[float, float] = (-3.60, -2.80),
+    entry_center_y_range: tuple[float, float] = (-3.45, -2.95),
+    entry_target_xy: tuple[float, float] = (0.0, -3.2),
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track signed S-curve route speed, including side-band entry guidance."""
+    if high_speed_threshold < 0.0:
+        raise ValueError(
+            "high_speed_threshold must be non-negative, got "
+            f"{high_speed_threshold}."
+        )
+
+    x_low, x_high = (float(value) for value in entry_local_x_range)
+    y_low, y_high = (float(value) for value in entry_local_y_range)
+    center_y_low, center_y_high = (float(value) for value in entry_center_y_range)
+    if x_low > x_high:
+        raise ValueError(f"entry_local_x_range must be ordered, got {entry_local_x_range}.")
+    if y_low > y_high:
+        raise ValueError(f"entry_local_y_range must be ordered, got {entry_local_y_range}.")
+    if not y_low <= center_y_low <= center_y_high <= y_high:
+        raise ValueError(
+            "entry_center_y_range must lie within entry_local_y_range, got "
+            f"{entry_center_y_range} and {entry_local_y_range}."
+        )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    if not active.any() or not _has_s_curve_sub_terrain(env):
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    _, path_tangent, _, _, inward_dir = _s_curve_project_to_centerline(
+        env, local_xy, samples_per_semicircle
+    )
+    path_tangent = _bias_s_curve_tangent_to_inward(
+        path_tangent, inward_dir, inward_tangent_bias_deg
+    )
+
+    in_entry_region = (
+        (local_xy[:, 0] >= x_low)
+        & (local_xy[:, 0] <= x_high)
+        & (local_xy[:, 1] >= y_low)
+        & (local_xy[:, 1] <= y_high)
+    )
+    in_entry_side_band = in_entry_region & (
+        (local_xy[:, 1] < center_y_low) | (local_xy[:, 1] > center_y_high)
+    )
+    entry_target = torch.tensor(entry_target_xy, dtype=local_xy.dtype, device=local_xy.device)
+    entry_direction = entry_target.unsqueeze(0) - local_xy
+    entry_direction /= torch.clamp(
+        torch.norm(entry_direction, dim=1, keepdim=True), min=1.0e-6
+    )
+    desired_direction = torch.where(
+        in_entry_side_band.unsqueeze(1), entry_direction, path_tangent
+    )
+    route_speed = torch.sum(asset.data.root_lin_vel_w[:, :2] * desired_direction, dim=1)
+
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    abs_command_x = torch.abs(command_x)
+    abs_route_speed = torch.abs(route_speed)
+    zero_command = abs_command_x < 0.1
+    relative_error = torch.abs(command_x - route_speed) / (abs_command_x + 1.0e-5)
+    reward = torch.clamp(1.0 - 2.0 * relative_error, min=-1.5, max=1.0)
+    reward = torch.where(command_x * route_speed < 0.0, reward - 1.0, reward)
+
+    aggressive_underspeed = (
+        (abs_command_x > float(high_speed_threshold)) & (abs_route_speed < abs_command_x)
+    )
+    reward -= torch.where(
+        aggressive_underspeed,
+        0.5 * relative_error,
+        torch.zeros_like(relative_error),
+    )
+    reward *= torch.clamp(abs_command_x / 1.5, min=0.2, max=1.0)
+    reward = torch.where(zero_command, torch.zeros_like(reward), reward)
+    return reward * active.float()
+
+
 def s_curve_path_forward_reward(
     env: ManagerBasedRLEnv,
     terrain_types: tuple[str, ...] = ("s_curve",),
@@ -2589,3 +3004,500 @@ def figure8_bridge_path_progress_reward(
         mask, torch.ones_like(prev_valid) | reset, prev_valid
     )
     return reward
+def l_curve_path_speed_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    std: float = 0.25,
+    min_cmd_speed: float = 0.1,
+    turn_radius_ratio: float = 0.4,
+    corner_speed_cap_mps: float = 0.4,
+    corner_approach_distance_m: float = 0.5,
+    corner_recovery_distance_m: float = 0.3,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track commanded speed along the rounded L-bridge tangent.
+
+    The target speed smoothly drops to ``corner_speed_cap_mps`` around the
+    quarter-circle turn and returns to the sampled command on the exit leg.
+    """
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+    if corner_speed_cap_mps <= 0.0:
+        raise ValueError(
+            "corner_speed_cap_mps must be positive, got "
+            f"{corner_speed_cap_mps}."
+        )
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= command_x > float(min_cmd_speed)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    state, _ = l_curve_path_state(
+        env,
+        local_xy,
+        sub_terrain_key=sub_terrain_key,
+        turn_radius_ratio=turn_radius_ratio,
+        bidirectional=bidirectional,
+    )
+    corner_blend = l_curve_corner_blend(
+        state,
+        approach_distance_m=corner_approach_distance_m,
+        recovery_distance_m=corner_recovery_distance_m,
+    )
+    corner_target = torch.minimum(
+        command_x,
+        torch.full_like(command_x, float(corner_speed_cap_mps)),
+    )
+    target_speed = torch.lerp(command_x, corner_target, corner_blend)
+    velocity_along_path = (
+        asset.data.root_lin_vel_w[:, :2] * state.tangent
+    ).sum(dim=1)
+    reward = torch.exp(
+        -torch.square(velocity_along_path - target_speed) / float(std) ** 2
+    )
+    return reward * active.float()
+
+
+def l_curve_heading_tangent_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    std: float = 0.5,
+    min_cmd_speed: float = 0.1,
+    turn_radius_ratio: float = 0.4,
+    lookahead_base_m: float = 0.25,
+    lookahead_speed_scale_s: float = 0.25,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Align root heading with a speed-dependent preview tangent of the L path."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+    if lookahead_base_m < 0.0 or lookahead_speed_scale_s < 0.0:
+        raise ValueError("L-curve lookahead settings must be non-negative.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= command_x > float(min_cmd_speed)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    lookahead = float(lookahead_base_m) + float(
+        lookahead_speed_scale_s
+    ) * torch.abs(command_x)
+    state, _ = l_curve_path_state(
+        env,
+        local_xy,
+        sub_terrain_key=sub_terrain_key,
+        turn_radius_ratio=turn_radius_ratio,
+        lookahead_distance_m=lookahead,
+        bidirectional=bidirectional,
+    )
+
+    quaternion = asset.data.root_quat_w
+    w, x, y, z = (
+        quaternion[:, 0],
+        quaternion[:, 1],
+        quaternion[:, 2],
+        quaternion[:, 3],
+    )
+    body_forward = torch.stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (w * z + x * y),
+        ),
+        dim=1,
+    )
+    body_forward = body_forward / torch.linalg.vector_norm(
+        body_forward, dim=1, keepdim=True
+    ).clamp_min(1.0e-6)
+    dot = torch.clamp(
+        (body_forward * state.preview_tangent).sum(dim=1),
+        min=-1.0,
+        max=1.0,
+    )
+    cross_z = (
+        body_forward[:, 0] * state.preview_tangent[:, 1]
+        - body_forward[:, 1] * state.preview_tangent[:, 0]
+    )
+    yaw_error = torch.atan2(cross_z, dot)
+    reward = torch.exp(-torch.square(yaw_error) / float(std) ** 2)
+    return reward * active.float()
+
+
+def _l_curve_preview_guidance(
+    env: ManagerBasedRLEnv,
+    asset: Articulation,
+    command_x: torch.Tensor,
+    *,
+    turn_radius_ratio: float,
+    lookahead_base_m: float,
+    lookahead_speed_scale_s: float,
+    lookahead_max_m: float,
+    preview_point_weight: float,
+    sub_terrain_key: str,
+    bidirectional: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return path state, geometry width, preview direction and yaw error."""
+    if lookahead_base_m < 0.0 or lookahead_speed_scale_s < 0.0:
+        raise ValueError("L-curve lookahead settings must be non-negative.")
+    if lookahead_max_m <= 0.0:
+        raise ValueError("lookahead_max_m must be positive.")
+    if not 0.0 <= preview_point_weight <= 1.0:
+        raise ValueError("preview_point_weight must be in [0, 1].")
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    lookahead = (
+        float(lookahead_base_m)
+        + float(lookahead_speed_scale_s) * torch.abs(command_x)
+    ).clamp(max=float(lookahead_max_m))
+    state, geometry = l_curve_path_state(
+        env,
+        local_xy,
+        sub_terrain_key=sub_terrain_key,
+        turn_radius_ratio=turn_radius_ratio,
+        lookahead_distance_m=lookahead,
+        bidirectional=bidirectional,
+    )
+
+    direction_to_preview = state.preview_point - local_xy
+    preview_distance = torch.linalg.vector_norm(
+        direction_to_preview, dim=1, keepdim=True
+    )
+    direction_to_preview = direction_to_preview / preview_distance.clamp_min(
+        1.0e-6
+    )
+    direction_to_preview = torch.where(
+        preview_distance > 1.0e-6,
+        direction_to_preview,
+        state.preview_tangent,
+    )
+    target_direction = (
+        float(preview_point_weight) * direction_to_preview
+        + (1.0 - float(preview_point_weight)) * state.preview_tangent
+    )
+    target_direction = target_direction / torch.linalg.vector_norm(
+        target_direction, dim=1, keepdim=True
+    ).clamp_min(1.0e-6)
+
+    quaternion = asset.data.root_quat_w
+    w, x, y, z = (
+        quaternion[:, 0],
+        quaternion[:, 1],
+        quaternion[:, 2],
+        quaternion[:, 3],
+    )
+    body_forward = torch.stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (w * z + x * y),
+        ),
+        dim=1,
+    )
+    body_forward = body_forward / torch.linalg.vector_norm(
+        body_forward, dim=1, keepdim=True
+    ).clamp_min(1.0e-6)
+    dot = torch.clamp(
+        (body_forward * target_direction).sum(dim=1),
+        min=-1.0,
+        max=1.0,
+    )
+    cross_z = (
+        body_forward[:, 0] * target_direction[:, 1]
+        - body_forward[:, 1] * target_direction[:, 0]
+    )
+    yaw_error = torch.atan2(cross_z, dot)
+    return state, geometry.passage_width_m, target_direction, yaw_error
+
+
+def l_curve_corner_heading_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    min_cmd_speed: float = 0.1,
+    turn_radius_ratio: float = 0.4,
+    lookahead_base_m: float = 0.55,
+    lookahead_speed_scale_s: float = 0.1,
+    lookahead_max_m: float = 0.75,
+    preview_point_weight: float = 0.7,
+    corner_approach_distance_m: float = 0.7,
+    corner_recovery_distance_m: float = 0.3,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize preview-heading error without Gaussian saturation."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= command_x > float(min_cmd_speed)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    state, _, _, yaw_error = _l_curve_preview_guidance(
+        env,
+        asset,
+        command_x,
+        turn_radius_ratio=turn_radius_ratio,
+        lookahead_base_m=lookahead_base_m,
+        lookahead_speed_scale_s=lookahead_speed_scale_s,
+        lookahead_max_m=lookahead_max_m,
+        preview_point_weight=preview_point_weight,
+        sub_terrain_key=sub_terrain_key,
+        bidirectional=bidirectional,
+    )
+    corner_blend = l_curve_corner_blend(
+        state,
+        approach_distance_m=corner_approach_distance_m,
+        recovery_distance_m=corner_recovery_distance_m,
+    )
+    penalty = corner_blend * (1.0 - torch.cos(yaw_error))
+    return penalty * active.float()
+
+
+def l_curve_corner_yaw_rate_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    std: float = 0.35,
+    min_cmd_speed: float = 0.1,
+    turn_radius_ratio: float = 0.4,
+    corner_speed_cap_mps: float = 0.35,
+    heading_feedback_gain: float = 0.8,
+    max_ref_ang_vel_rps: float = 1.2,
+    forward_gate_floor: float = 0.3,
+    lookahead_base_m: float = 0.55,
+    lookahead_speed_scale_s: float = 0.1,
+    lookahead_max_m: float = 0.75,
+    preview_point_weight: float = 0.7,
+    corner_approach_distance_m: float = 0.7,
+    corner_recovery_distance_m: float = 0.3,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track a curvature-aware left-turn yaw rate near the L corner."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+    if corner_speed_cap_mps <= 0.0 or max_ref_ang_vel_rps <= 0.0:
+        raise ValueError("Corner speed and maximum yaw rate must be positive.")
+    if not 0.0 <= forward_gate_floor <= 1.0:
+        raise ValueError("forward_gate_floor must be in [0, 1].")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= command_x > float(min_cmd_speed)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    state, passage_width, target_direction, yaw_error = (
+        _l_curve_preview_guidance(
+            env,
+            asset,
+            command_x,
+            turn_radius_ratio=turn_radius_ratio,
+            lookahead_base_m=lookahead_base_m,
+            lookahead_speed_scale_s=lookahead_speed_scale_s,
+            lookahead_max_m=lookahead_max_m,
+            preview_point_weight=preview_point_weight,
+            sub_terrain_key=sub_terrain_key,
+            bidirectional=bidirectional,
+        )
+    )
+    corner_blend = l_curve_corner_blend(
+        state,
+        approach_distance_m=corner_approach_distance_m,
+        recovery_distance_m=corner_recovery_distance_m,
+    )
+    corner_speed = torch.minimum(
+        command_x,
+        torch.full_like(command_x, float(corner_speed_cap_mps)),
+    )
+    turn_radius = (
+        passage_width.to(dtype=command_x.dtype)
+        * float(turn_radius_ratio)
+    ).clamp_min(1.0e-6)
+    # Curvature feedforward is needed only on the circular segment. The
+    # preview-heading feedback starts the turn on approach and removes any
+    # residual heading error after the arc without forcing continued rotation.
+    on_arc = (
+        (state.progress_m >= state.arc_start_progress_m)
+        & (state.progress_m <= state.arc_end_progress_m)
+    ).float()
+    travel_direction = (
+        l_curve_travel_direction_sign(
+            env,
+            command_x.device,
+            command_x.dtype,
+        )
+        if bidirectional
+        else torch.ones_like(command_x)
+    )
+    feedforward_yaw_rate = (
+        travel_direction * on_arc * corner_speed / turn_radius
+    )
+    reference_yaw_rate = torch.clamp(
+        feedforward_yaw_rate + float(heading_feedback_gain) * yaw_error,
+        min=-float(max_ref_ang_vel_rps),
+        max=float(max_ref_ang_vel_rps),
+    )
+    yaw_rate_reward = torch.exp(
+        -torch.square(
+            asset.data.root_ang_vel_w[:, 2] - reference_yaw_rate
+        )
+        / float(std) ** 2
+    )
+
+    velocity_toward_preview = (
+        asset.data.root_lin_vel_w[:, :2] * target_direction
+    ).sum(dim=1)
+    progress_ratio = torch.clamp(
+        velocity_toward_preview / corner_speed.clamp_min(float(min_cmd_speed)),
+        min=0.0,
+        max=1.0,
+    )
+    forward_gate = float(forward_gate_floor) + (
+        1.0 - float(forward_gate_floor)
+    ) * progress_ratio
+    return yaw_rate_reward * forward_gate * corner_blend * active.float()
+
+
+def l_curve_corner_progress_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    min_cmd_speed: float = 0.1,
+    turn_radius_ratio: float = 0.4,
+    corner_speed_cap_mps: float = 0.35,
+    lookahead_base_m: float = 0.55,
+    lookahead_speed_scale_s: float = 0.1,
+    lookahead_max_m: float = 0.75,
+    preview_point_weight: float = 0.7,
+    corner_approach_distance_m: float = 0.7,
+    corner_recovery_distance_m: float = 0.3,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward velocity toward the preview point around the L corner."""
+    if corner_speed_cap_mps <= 0.0:
+        raise ValueError("corner_speed_cap_mps must be positive.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    command_x = env.command_manager.get_command(command_name)[:, 0]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    active &= command_x > float(min_cmd_speed)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    state, _, target_direction, _ = _l_curve_preview_guidance(
+        env,
+        asset,
+        command_x,
+        turn_radius_ratio=turn_radius_ratio,
+        lookahead_base_m=lookahead_base_m,
+        lookahead_speed_scale_s=lookahead_speed_scale_s,
+        lookahead_max_m=lookahead_max_m,
+        preview_point_weight=preview_point_weight,
+        sub_terrain_key=sub_terrain_key,
+        bidirectional=bidirectional,
+    )
+    corner_blend = l_curve_corner_blend(
+        state,
+        approach_distance_m=corner_approach_distance_m,
+        recovery_distance_m=corner_recovery_distance_m,
+    )
+    corner_speed = torch.minimum(
+        command_x,
+        torch.full_like(command_x, float(corner_speed_cap_mps)),
+    )
+    velocity_toward_preview = (
+        asset.data.root_lin_vel_w[:, :2] * target_direction
+    ).sum(dim=1)
+    progress_reward = torch.clamp(
+        velocity_toward_preview / corner_speed.clamp_min(float(min_cmd_speed)),
+        min=0.0,
+        max=1.0,
+    )
+    return progress_reward * corner_blend * active.float()
+
+
+def l_curve_centerline_reward(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    std: float = 0.5,
+    edge_buffer_m: float = 0.05,
+    turn_radius_ratio: float = 0.4,
+    sub_terrain_key: str = "l_curve",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward the rounded centerline using the active bridge width as scale."""
+    if std <= 0.0:
+        raise ValueError(f"std must be positive, got {std}.")
+    if edge_buffer_m <= 0.0:
+        raise ValueError(f"edge_buffer_m must be positive, got {edge_buffer_m}.")
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    state, geometry = l_curve_path_state(
+        env,
+        local_xy,
+        sub_terrain_key=sub_terrain_key,
+        turn_radius_ratio=turn_radius_ratio,
+    )
+    half_width = (0.5 * geometry.passage_width_m).clamp_min(1.0e-6)
+    normalized_lateral_error = state.lateral_distance / half_width
+    center_reward = torch.exp(
+        -torch.square(normalized_lateral_error / float(std))
+    )
+    edge_margin = half_width - state.lateral_distance
+    edge_scale = torch.clamp(
+        edge_margin / float(edge_buffer_m),
+        min=0.0,
+        max=1.0,
+    )
+    return center_reward * edge_scale * active.float()
+
+
+def l_curve_lateral_velocity_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] = ("l_curve",),
+    turn_radius_ratio: float = 0.4,
+    sub_terrain_key: str = "l_curve",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize squared velocity normal to the rounded L reference path."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    active = _terrain_type_mask(env, terrain_types, asset.device)
+    if not active.any():
+        return torch.zeros(env.num_envs, device=asset.device)
+
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    state, _ = l_curve_path_state(
+        env,
+        local_xy,
+        sub_terrain_key=sub_terrain_key,
+        turn_radius_ratio=turn_radius_ratio,
+    )
+    path_normal = torch.stack(
+        (-state.tangent[:, 1], state.tangent[:, 0]), dim=1
+    )
+    lateral_velocity = (
+        asset.data.root_lin_vel_w[:, :2] * path_normal
+    ).sum(dim=1)
+    return torch.square(lateral_velocity) * active.float()

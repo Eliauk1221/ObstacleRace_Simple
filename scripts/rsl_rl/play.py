@@ -66,12 +66,17 @@ parser.add_argument(
         "symmetric_slope",
         "braking_slope",
         "thin_obstacles",
+        "square_ring_wall",
+        "hurdle",
         "pillar_flat",
         "stairs_up",
         "stairs_down",
         "spiral_stairs_up",
         "spiral_stairs_down",
         "figure8_bridge",
+        "s_curve",
+        "l_curve",
+        "thin_l_railed_platform",
     ],
     help=(
         "Single-cell demo terrain: interlaced_corridor_wedges (首段中心出生), "
@@ -82,10 +87,13 @@ parser.add_argument(
         "symmetric_slope (3 m x 3.5 m、20 度对称 V 形斜坡), "
         "braking_slope (四级上台阶直连 30 度下坡), "
         "thin_obstacles (随机分布的窄障碍物), "
+        "square_ring_wall (三道同心回形跨栏), "
+        "hurdle (两道同心回形跨栏，首道内沿距中心 2 m), "
         "pillar_flat (随机分布的高柱), "
         "stairs_up / stairs_down (带四条对角实体护板的上下台阶), "
         "spiral_stairs_up / spiral_stairs_down (相邻高度层旋转 4.5 度的螺旋上下台阶), "
-        "figure8_bridge (闭合 8 字桥, Trimesh). "
+        "figure8_bridge (闭合 8 字桥, Trimesh), "
+        "s_curve (双半圆 S 型高台, Trimesh). "
         "Empty string disables."
     ),
 )
@@ -94,6 +102,12 @@ parser.add_argument(
     type=float,
     default=1.0,
     help="Difficulty for --showcase_terrain single-cell demo (0.0–1.0).",
+)
+parser.add_argument(
+    "--visualize_square_ring_bands",
+    action="store_true",
+    default=False,
+    help="Visualize square-ring inner bands in red and outer bands in cyan.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -466,6 +480,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )
                 }
+            elif st == "square_ring_wall":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.HfHurdleTerrainCfg(
+                        proportion=1.0,
+                        platform_width=1.5,
+                        hurdle_height_range=(0.05, 0.20),
+                        hurdle_width_pixels=(2, 2, 3),
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+            elif st == "hurdle":
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.HfHurdleTerrainCfg(
+                        proportion=1.0,
+                        platform_width=1.5,
+                        num_hurdles=2,
+                        first_hurdle_distance=2.0,
+                        hurdle_height_range=(0.3, 0.3),
+                        hurdle_width_pixels=2,
+                        flat_patch_sampling=_flat_patch_target_for_pose_command(),
+                    )
+                }
+                reset_cfg = getattr(getattr(env_cfg, "events", None), "reset_robot_states", None)
+                if reset_cfg is not None:
+                    reset_cfg.params.setdefault("terrain_specific_prob_rsi", {})["hurdle"] = 1.0
             elif st == "pillar_flat":
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
                     st: terrain_gen.MeshFlatPillarsTerrainCfg(
@@ -543,6 +582,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         samples_per_loop=128,
                     )
                 }
+            elif st == "s_curve":
+                env_cfg.scene.terrain.terrain_generator.size = (8.0, 8.0)
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshSCurveTerrainCfg(
+                        proportion=1.0,
+                        size=(8.0, 8.0),
+                        radius_m=1.6,
+                        height_range_m=(0.08, 0.12),
+                        path_width_by_level=(1.0, 0.9, 0.81, 0.73, 0.66, 0.6, 0.55, 0.5, 0.45, 0.4),
+                        center_offset_m=(0.0, 0.0),
+                        samples_per_semicircle=64,
+                    )
+                }
+            elif st in ("l_curve", "thin_l_railed_platform"):
+                thin = st == "thin_l_railed_platform"
+                env_cfg.scene.terrain.terrain_generator.size = (8.0, 8.0)
+                env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+                    st: terrain_gen.MeshLRailedPlatformTerrainCfg(
+                        proportion=1.0, size=(8.0, 8.0), first_leg_start_center_m=(1.5, 1.5),
+                        num_steps=2, step_height_m=0.15, tread_depth_m=0.30, leg_length_m=4.0,
+                        width_range_m=(1.5, 0.7), num_width_levels=10, guardrail_height_m=1.20,
+                        guardrail_depth_m=0.10, guardrail_rail_height_m=0.05 if thin else 0.10,
+                        hollow_opening_width_m=0.35 if thin else 0.20,
+                        hollow_opening_height_m=1.10 if thin else 1.00,
+                        hollow_post_width_m=0.05 if thin else 0.20,
+                        spawn_distance_before_stairs_m=0.60, ground_thickness_m=0.05,
+                    )
+                }
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
     if CONTROL_ROBOT:
@@ -571,6 +638,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    if args_cli.visualize_square_ring_bands:
+        if args_cli.showcase_terrain != "square_ring_wall":
+            print("[WARN] --visualize_square_ring_bands requires --showcase_terrain square_ring_wall; disabled.")
+        else:
+            virtual_obstacles = env.unwrapped.scene.terrain.virtual_obstacles
+            band_keys = ("square_ring_wall_inner_bands", "square_ring_wall_outer_bands")
+            missing_keys = [key for key in band_keys if key not in virtual_obstacles]
+            if missing_keys:
+                print(f"[WARN] Square-ring virtual bands are not registered: {missing_keys}.")
+            else:
+                for key in band_keys:
+                    virtual_obstacles[key].visualize()
+                print("[INFO] Square-ring bands visible: inner=red, outer=cyan.")
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):

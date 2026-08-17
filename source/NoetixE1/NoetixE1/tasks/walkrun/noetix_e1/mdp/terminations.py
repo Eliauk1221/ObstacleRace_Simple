@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 from isaaclab.managers import ManagerTermBase, ManagerTermBaseCfg, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.terrains import TerrainImporter
+from .l_railed_platform import (
+    l_curve_reverse_direction_mask,
+    l_railed_platform_geometry,
+)
 
 def fall_down_in_some_terrain(
     env: ManagerBasedRLEnv,
@@ -613,3 +617,261 @@ class illegal_reset_contact(ManagerTermBase):
         if env_ids is None:
             env_ids = slice(None)
         self.illegal_contact_counter[env_ids] = 0
+
+
+def _assigned_terrain_mask(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] | list[str],
+) -> torch.Tensor:
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import get_terrain_type_names_to_col_map
+
+    names_to_cols = get_terrain_type_names_to_col_map(env)
+    desired_columns = [column for name in terrain_types for column in names_to_cols.get(name, ())]
+    if not desired_columns:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    desired = torch.tensor(desired_columns, dtype=torch.long, device=env.device)
+    return torch.isin(env.scene.terrain.terrain_types, desired)
+
+
+def bad_orientation_in_terrain(
+    env: ManagerBasedRLEnv,
+    limit_angle: float,
+    terrain_types: tuple[str, ...] | list[str],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate tilted robots only on the selected terrain types."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    tilted = torch.acos(-asset.data.projected_gravity_b[:, 2]).abs() > float(limit_angle)
+    return tilted & _assigned_terrain_mask(env, terrain_types)
+
+
+class terrain_illegal_contact(ManagerTermBase):
+    """Accumulate illegal contacts only while an environment is on selected terrain types."""
+
+    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.illegal_contact_counter = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.int
+        )
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        threshold: float,
+        sensor_cfg: SceneEntityCfg,
+        terrain_types: tuple[str, ...] | list[str],
+        episode_length_threshold: int = 1,
+        print_reason: bool = False,
+    ) -> torch.Tensor:
+        contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+        net_contact_forces = contact_sensor.data.net_forces_w_history
+        contacts = torch.any(
+            torch.max(
+                torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1),
+                dim=1,
+            )[0]
+            > float(threshold),
+            dim=1,
+        )
+        on_terrain = _assigned_terrain_mask(env, terrain_types)
+        self.illegal_contact_counter += (contacts & on_terrain).int()
+        terminated = on_terrain & (
+            self.illegal_contact_counter >= int(episode_length_threshold)
+        )
+        if terminated.any() and print_reason:
+            print(f"terrain_illegal_contact: {terminated.sum()} envs")
+        return terminated
+
+    def reset(self, env_ids: Sequence[int] | slice | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self.illegal_contact_counter[env_ids] = 0
+
+
+def _straight_railed_platform_on_terrain_mask(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] | list[str],
+) -> torch.Tensor:
+    from NoetixE1.tasks.walkrun.noetix_e1.mdp.curriculums import (
+        _check_terrain_types_from_positions,
+    )
+
+    col_indices = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+    if col_indices is None:
+        asset: Articulation = env.scene["robot"]
+        return _check_terrain_types_from_positions(
+            env,
+            asset.data.root_pos_w,
+            terrain_types,
+        )
+    return _check_terrain_types_from_positions(
+        env,
+        None,
+        terrain_types,
+        col_indices=col_indices,
+    )
+
+
+def l_curve_reach_end_timeout(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] | list[str] = ("l_curve",),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "contact_sensor",
+        body_names=".*_ankle_roll_link",
+    ),
+    contact_force_threshold: float = 0.5,
+    completion_margin_m: float = 0.05,
+    exit_lateral_tolerance_m: float = 0.15,
+    sub_terrain_key: str = "l_curve",
+    bidirectional: bool = False,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """End successfully after both feet contact the destination ground."""
+    on_terrain = _straight_railed_platform_on_terrain_mask(
+        env,
+        terrain_types,
+    )
+    if not on_terrain.any():
+        return torch.zeros(
+            env.num_envs,
+            dtype=torch.bool,
+            device=env.device,
+        )
+
+    geometry = l_railed_platform_geometry(env, sub_terrain_key)
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    foot_body_ids = contact_sensor_cfg.body_ids
+    foot_xy = (
+        asset.data.body_pos_w[:, foot_body_ids, :2]
+        - env.scene.env_origins[:, :2].unsqueeze(1)
+    )
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(
+            torch.norm(
+                net_contact_forces[:, :, foot_body_ids, :],
+                dim=-1,
+            ),
+            dim=1,
+        )[0]
+        > float(contact_force_threshold)
+    )
+    past_forward_exit = foot_xy[..., 1] >= (
+        geometry.route_end_y_m + float(completion_margin_m)
+    )
+    within_forward_exit = torch.abs(
+        foot_xy[..., 0] - geometry.corner_x_m
+    ) <= (
+        0.5 * geometry.passage_width_m.unsqueeze(1)
+        + float(exit_lateral_tolerance_m)
+    )
+    reached_forward_end = (
+        feet_contact & past_forward_exit & within_forward_exit
+    ).all(dim=1)
+    if bidirectional:
+        reverse_direction = l_curve_reverse_direction_mask(
+            env,
+            foot_xy.device,
+        )
+        past_reverse_exit = foot_xy[..., 0] <= (
+            geometry.approach_start_x_m - float(completion_margin_m)
+        )
+        within_reverse_exit = torch.abs(foot_xy[..., 1]) <= (
+            0.5 * geometry.passage_width_m.unsqueeze(1)
+            + float(exit_lateral_tolerance_m)
+        )
+        reached_reverse_end = (
+            feet_contact & past_reverse_exit & within_reverse_exit
+        ).all(dim=1)
+        reached_end = torch.where(
+            reverse_direction,
+            reached_reverse_end,
+            reached_forward_end,
+        )
+    else:
+        reached_end = reached_forward_end
+    return on_terrain & reached_end
+
+
+def l_curve_invalid_foot_contact(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...] | list[str] = ("l_curve",),
+    contact_sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "contact_sensor",
+        body_names=".*_ankle_roll_link",
+    ),
+    contact_force_threshold: float = 0.5,
+    edge_tolerance_m: float = 0.03,
+    start_region_tolerance_m: float = 0.15,
+    exit_region_tolerance_m: float = 0.15,
+    sub_terrain_key: str = "l_curve",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Fail when a contacting foot lands outside the complete L walkable route."""
+    on_terrain = _straight_railed_platform_on_terrain_mask(
+        env,
+        terrain_types,
+    )
+    if not on_terrain.any():
+        return torch.zeros(
+            env.num_envs,
+            dtype=torch.bool,
+            device=env.device,
+        )
+
+    geometry = l_railed_platform_geometry(env, sub_terrain_key)
+    asset: Articulation = env.scene[asset_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[contact_sensor_cfg.name]
+    foot_body_ids = contact_sensor_cfg.body_ids
+    foot_xy = (
+        asset.data.body_pos_w[:, foot_body_ids, :2]
+        - env.scene.env_origins[:, :2].unsqueeze(1)
+    )
+    foot_x = foot_xy[..., 0]
+    foot_y = foot_xy[..., 1]
+    half_width = 0.5 * geometry.passage_width_m.unsqueeze(1)
+    edge_width = half_width + float(edge_tolerance_m)
+
+    # The approach ground, horizontal bridge, vertical bridge, and exit ground
+    # form the complete set of valid support regions. The union intentionally
+    # excludes the two missing quadrants around the L corner.
+    valid_approach = (
+        (foot_x >= geometry.approach_start_x_m - 0.5)
+        & (foot_x <= geometry.route_start_x_m + float(edge_tolerance_m))
+        & (torch.abs(foot_y) <= half_width + float(start_region_tolerance_m))
+    )
+    valid_horizontal = (
+        (foot_x >= geometry.route_start_x_m - float(edge_tolerance_m))
+        & (foot_x <= geometry.corner_x_m + edge_width)
+        & (torch.abs(foot_y) <= edge_width)
+    )
+    valid_vertical = (
+        (torch.abs(foot_x - geometry.corner_x_m) <= edge_width)
+        & (foot_y >= -edge_width)
+        & (foot_y <= geometry.route_end_y_m + float(edge_tolerance_m))
+    )
+    valid_exit = (
+        (foot_y >= geometry.route_end_y_m - float(edge_tolerance_m))
+        & (
+            torch.abs(foot_x - geometry.corner_x_m)
+            <= half_width + float(exit_region_tolerance_m)
+        )
+    )
+    valid_support = (
+        valid_approach | valid_horizontal | valid_vertical | valid_exit
+    )
+
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    feet_contact = (
+        torch.max(
+            torch.norm(
+                net_contact_forces[:, :, foot_body_ids, :],
+                dim=-1,
+            ),
+            dim=1,
+        )[0]
+        > float(contact_force_threshold)
+    )
+    invalid_contact = (feet_contact & ~valid_support).any(dim=1)
+    return on_terrain & invalid_contact

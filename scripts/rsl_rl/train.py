@@ -30,8 +30,8 @@ parser.add_argument(
     "--showcase_terrain",
     type=str,
     default="",
-    choices=["", "figure8_bridge"],
-    help="Force the closed figure8 bridge as the only training sub-terrain.",
+    choices=["", "figure8_bridge", "l_curve", "thin_l_railed_platform"],
+    help="Force one supported terrain as the only training sub-terrain.",
 )
 parser.add_argument(
     "--showcase_difficulty",
@@ -115,7 +115,7 @@ torch.backends.cudnn.benchmark = False
 
 
 def _apply_showcase_terrain(env_cfg, showcase: str, difficulty: float) -> None:
-    """Override training with the old branch's closed figure8 Trimesh terrain."""
+    """Override training with one supported Trimesh terrain."""
     if not showcase or env_cfg.scene.terrain.terrain_type != "generator":
         return
     gen = env_cfg.scene.terrain.terrain_generator
@@ -124,9 +124,10 @@ def _apply_showcase_terrain(env_cfg, showcase: str, difficulty: float) -> None:
     gen.curriculum = False
     gen.difficulty_range = (difficulty, difficulty)
     gen.use_cache = False
-    gen.size = (12.0, 12.0)
-    gen.sub_terrains = {
-        "figure8_bridge": terrain_gen.MeshFigure8BridgeTerrainCfg(
+    if showcase == "figure8_bridge":
+        gen.size = (12.0, 12.0)
+        gen.sub_terrains = {
+            "figure8_bridge": terrain_gen.MeshFigure8BridgeTerrainCfg(
             proportion=1.0,
             size=(12.0, 12.0),
             inner_radius_m=2.5,
@@ -136,8 +137,23 @@ def _apply_showcase_terrain(env_cfg, showcase: str, difficulty: float) -> None:
             center_cutout_width_m=0.8,
             center_cutout_length_m=0.8,
             samples_per_loop=128,
-        )
-    }
+            )
+        }
+    else:
+        gen.size = (8.0, 8.0)
+        thin = showcase == "thin_l_railed_platform"
+        gen.sub_terrains = {
+            showcase: terrain_gen.MeshLRailedPlatformTerrainCfg(
+                proportion=1.0, size=(8.0, 8.0), first_leg_start_center_m=(1.5, 1.5),
+                num_steps=2, step_height_m=0.15, tread_depth_m=0.30, leg_length_m=4.0,
+                width_range_m=(1.5, 0.7), num_width_levels=10, guardrail_height_m=1.20,
+                guardrail_depth_m=0.10, guardrail_rail_height_m=0.05 if thin else 0.10,
+                hollow_opening_width_m=0.35 if thin else 0.20,
+                hollow_opening_height_m=1.10 if thin else 1.00,
+                hollow_post_width_m=0.05 if thin else 0.20,
+                spawn_distance_before_stairs_m=0.60, ground_thickness_m=0.05,
+            )
+        }
     print(f"[INFO] showcase_terrain={showcase!r}, difficulty={difficulty}")
 
 
