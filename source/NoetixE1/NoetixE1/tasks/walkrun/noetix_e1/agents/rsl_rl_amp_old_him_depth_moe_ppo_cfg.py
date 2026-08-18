@@ -90,7 +90,7 @@ class AmpPpoDepthRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # amp discriminator parameter
     normalize_style_reward = False
-    amp_reward_coef = 0.8  # motion:(0.4, 0.5) policy:(0.8, 0.8)
+    amp_reward_coef = 2.0  # motion:(0.4, 0.5) policy:(0.8, 0.8)
     amp_reward_lerp = 0.8  # reward = reward_coef * (1 - reward_lerp) * style_reward + reward_lerp * task_reward
     style_reward_function = "wasserstein_mapping"  # log_mapping, quad_mapping, wasserstein_mapping
     discriminator_shape = [1024, 512]

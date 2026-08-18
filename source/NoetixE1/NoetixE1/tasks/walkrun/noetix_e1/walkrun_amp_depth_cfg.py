@@ -739,7 +739,7 @@ class EventCfg:
                 "hurdle": [HURDLE_MOTION_FILE],
             },
             "terrain_specific_prob_rsi": {
-                "hurdle": 0.5,
+                "hurdle": 0.8,
             },
             "terrain_specific_joint_vel_range": {
                 "hurdle": (-0.5, 0.5),
@@ -1741,15 +1741,29 @@ class RewardsCfg:
     dof_torques_l2 = RewTerm(
         func=mdp.joint_torques_l2,
         weight=-1.5e-7,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"])},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]),
+            "skip_terrain_types": ("hurdle",),
+        },
     )
     dof_vel_l2 = RewTerm(
         func=mdp.joint_vel_l2,
         weight=-1e-4,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "skip_terrain_types": ("hurdle",),
+        },
     )
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.1)
+    dof_acc_l2 = RewTerm(
+        func=mdp.joint_acc_l2,
+        weight=-2.5e-7,
+        params={"skip_terrain_types": ("hurdle",)},
+    )
+    action_rate_l2 = RewTerm(
+        func=mdp.action_rate_l2,
+        weight=-0.1,
+        params={"skip_terrain_types": ("hurdle",)},
+    )
     torque_limits = RewTerm(
         func=mdp.applied_torque_limits_by_ratio,
         weight=-0.01,

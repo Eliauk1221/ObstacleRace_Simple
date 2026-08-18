@@ -568,9 +568,66 @@ def energy(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("r
     return reward
 
 
-def joint_acc_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+def joint_torques_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
+) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+    penalty = torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+    if skip_terrain_types:
+        penalty = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, penalty.device),
+            torch.zeros_like(penalty),
+            penalty,
+        )
+    return penalty
+
+
+def joint_vel_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    penalty = torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+    if skip_terrain_types:
+        penalty = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, penalty.device),
+            torch.zeros_like(penalty),
+            penalty,
+        )
+    return penalty
+
+
+def joint_acc_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skip_terrain_types: tuple[str, ...] | None = None,
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    penalty = torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+    if skip_terrain_types:
+        penalty = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, penalty.device),
+            torch.zeros_like(penalty),
+            penalty,
+        )
+    return penalty
+
+
+def action_rate_l2(
+    env: ManagerBasedRLEnv,
+    skip_terrain_types: tuple[str, ...] | None = None,
+) -> torch.Tensor:
+    penalty = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    if skip_terrain_types:
+        penalty = torch.where(
+            _terrain_type_mask(env, skip_terrain_types, penalty.device),
+            torch.zeros_like(penalty),
+            penalty,
+        )
+    return penalty
 
 
 def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:

@@ -610,7 +610,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
     num_rows=10,
-    num_cols=20,
+    num_cols=24,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=0.9,
@@ -753,15 +753,15 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             hurdle_width_pixels=(2, 2, 3),
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
         ),
-        # "hurdle": HfHurdleTerrainCfg(
-        #     proportion=0.3,
-        #     platform_width=1.5,
-        #     num_hurdles=2,
-        #     first_hurdle_distance=2.0,
-        #     hurdle_height_range=(0.25, 0.35),
-        #     hurdle_width_pixels=2,
-        #     flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
-        # ),
+        "hurdle": HfHurdleTerrainCfg(
+            proportion=0.4,
+            platform_width=1.5,
+            num_hurdles=1,
+            first_hurdle_distance=2.0,
+            hurdle_height_range=(0.25, 0.35),
+            hurdle_width_pixels=2,
+            flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),
+        ),
         # 保留地形名用于速度曲线对比；任务侧沿用 2026-07-24 坡前出生的稳定穿越设置。
         "interlaced_corridor_wedges_smooth_entry_exit": HfInterlacedCorridorWedgesTerrainCfg(
             proportion=0.3,
