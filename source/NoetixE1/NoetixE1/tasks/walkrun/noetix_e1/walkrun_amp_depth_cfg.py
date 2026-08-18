@@ -900,22 +900,22 @@ class EventCfg:
             },
             "terrain_specific_velocity_range": {
                 # # 第一阶段 hurdle 先不加 push robot
-                # "hurdle": {
-                #     "x": (-0.5, 0.5),
-                #     "y": (-0.5, 0.5),
-                #     "z": (-0.2, 0.2),
-                #     "roll": (-0.4, 0.4),
-                #     "pitch": (-0.4, 0.4),
-                #     "yaw": (-0.4, 0.4),
-                # },
                 "hurdle": {
-                    "x": (0.0, 0.0),
-                    "y": (0.0, 0.0),
-                    "z": (0.0, 0.0),
-                    "roll": (0.0, 0.0),
-                    "pitch": (0.0, 0.0),
-                    "yaw": (0.0, 0.0),
+                    "x": (-1.0, 1.0),
+                    "y": (-1.0, 1.0),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.78, 0.78),
+                    "pitch": (-0.78, 0.78),
+                    "yaw": (-0.78, 0.78),
                 },
+                # "hurdle": {
+                #     "x": (0.0, 0.0),
+                #     "y": (0.0, 0.0),
+                #     "z": (0.0, 0.0),
+                #     "roll": (0.0, 0.0),
+                #     "pitch": (0.0, 0.0),
+                #     "yaw": (0.0, 0.0),
+                # },
                 "plane": {
                     "x": (-1.0, 1.0),
                     "y": (-1.0, 1.0),
@@ -1685,17 +1685,17 @@ class RewardsCfg:
         },
     )
 
-    # undesired_contacts_height = RewTerm(
-    #     func=mdp.undesired_contacts_height,
-    #     weight=-10,
-    #     params={
-    #         "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=[".*_ankle_roll_link"]),
-    #         "asset_cfg": SceneEntityCfg("robot", body_names=[".*_ankle_roll_link"]),
-    #         "threshold": 1.0,
-    #         "terrain_types": ["hurdle"],
-    #         "height_threshold": 0.1,
-    #     },
-    # )
+    undesired_contacts_height = RewTerm(
+        func=mdp.undesired_contacts_height,
+        weight=-10,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=[".*_ankle_roll_link"]),
+            "asset_cfg": SceneEntityCfg("robot", body_names=[".*_ankle_roll_link"]),
+            "threshold": 1.0,
+            "terrain_types": ["hurdle"],
+            "height_threshold": 0.1,
+        },
+    )
 
     # ------------------------------------------------- Joint -------------------------------------------------
     joint_deviation_leg = RewTerm(
@@ -1743,7 +1743,7 @@ class RewardsCfg:
         weight=-1.5e-7,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]),
-            "skip_terrain_types": ("hurdle",),
+            # "skip_terrain_types": ("hurdle",),
         },
     )
     dof_vel_l2 = RewTerm(
@@ -1751,18 +1751,18 @@ class RewardsCfg:
         weight=-1e-4,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
-            "skip_terrain_types": ("hurdle",),
+            # "skip_terrain_types": ("hurdle",),
         },
     )
     dof_acc_l2 = RewTerm(
         func=mdp.joint_acc_l2,
         weight=-2.5e-7,
-        params={"skip_terrain_types": ("hurdle",)},
+        # params={"skip_terrain_types": ("hurdle",)},
     )
     action_rate_l2 = RewTerm(
         func=mdp.action_rate_l2,
         weight=-0.1,
-        params={"skip_terrain_types": ("hurdle",)},
+        params={"terrain_specific_scales": {"hurdle": 0.1}},
     )
     torque_limits = RewTerm(
         func=mdp.applied_torque_limits_by_ratio,

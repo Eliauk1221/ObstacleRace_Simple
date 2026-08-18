@@ -485,7 +485,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     st: terrain_gen.HfHurdleTerrainCfg(
                         proportion=1.0,
                         platform_width=1.5,
-                        hurdle_height_range=(0.05, 0.20),
+                        hurdle_height_range=(0.15, 0.15),
                         hurdle_width_pixels=(2, 2, 3),
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )

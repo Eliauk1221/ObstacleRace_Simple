@@ -51,7 +51,7 @@
   "r_arm_elbow_pitch_link",
   "r_arm_elbow_yaw_link"
  ],
- "MotionWeight": 3.0,
+ "MotionWeight": 0.5,
  "Frames": [
   [
    1.0825568437576294,

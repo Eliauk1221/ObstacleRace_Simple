@@ -619,8 +619,16 @@ def joint_acc_l2(
 def action_rate_l2(
     env: ManagerBasedRLEnv,
     skip_terrain_types: tuple[str, ...] | None = None,
+    terrain_specific_scales: dict[str, float] | None = None,
 ) -> torch.Tensor:
     penalty = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    if terrain_specific_scales:
+        for terrain_type, scale in terrain_specific_scales.items():
+            penalty = torch.where(
+                _terrain_type_mask(env, (terrain_type,), penalty.device),
+                penalty * float(scale),
+                penalty,
+            )
     if skip_terrain_types:
         penalty = torch.where(
             _terrain_type_mask(env, skip_terrain_types, penalty.device),
