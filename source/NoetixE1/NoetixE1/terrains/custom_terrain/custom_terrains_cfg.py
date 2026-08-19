@@ -505,8 +505,15 @@ class HfHurdleTerrainCfg(HfTerrainBaseCfg):
     first_hurdle_distance: float | None = None
     """Optional distance from the terrain center to the first hurdle's inner edge (in m).
 
-    When set, the first gap ends at this distance. Remaining hurdle rings are distributed
-    uniformly between the first hurdle and the terrain edge.
+    When set, the first gap ends at this distance. Unless ``inter_hurdle_gap_range`` is set,
+    remaining hurdle rings are distributed uniformly between the first hurdle and the terrain edge.
+    """
+
+    inter_hurdle_gap_range: tuple[float, float] | None = None
+    """Optional clear gap between adjacent hurdle rings at difficulty 0 and 1 (in m).
+
+    When set, the gap is linearly interpolated with terrain difficulty. The first hurdle
+    remains in its normal position, and subsequent hurdles move to realize this gap.
     """
 
     hurdle_height_range: tuple[float, float] = (0.05, 0.3)

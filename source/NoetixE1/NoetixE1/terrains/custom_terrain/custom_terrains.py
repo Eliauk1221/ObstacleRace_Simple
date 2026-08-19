@@ -1237,6 +1237,27 @@ def hurdle_terrain(
         remaining_space = available_space_pixels - total_hurdle_width_pixels
         uniform_gap_pixels = remaining_space // (num_hurdles + 1)
         gap_pixels_list = [uniform_gap_pixels] * num_hurdles
+
+    if cfg.inter_hurdle_gap_range is not None:
+        gap_at_easy, gap_at_hard = cfg.inter_hurdle_gap_range
+        inter_hurdle_gap = gap_at_easy + difficulty * (gap_at_hard - gap_at_easy)
+        if inter_hurdle_gap < 0.0:
+            raise ValueError(
+                "inter_hurdle_gap_range must produce non-negative gaps, "
+                f"got {inter_hurdle_gap} at difficulty {difficulty}"
+            )
+        inter_hurdle_gap_pixels = int(round(inter_hurdle_gap / cfg.horizontal_scale))
+        gap_pixels_list[1:] = [inter_hurdle_gap_pixels] * (num_hurdles - 1)
+
+    outer_half_size_pixels = (
+        platform_half_size_pixels + sum(gap_pixels_list) + total_hurdle_width_pixels
+    )
+    if outer_half_size_pixels > terrain_half_size_pixels:
+        raise ValueError(
+            "Hurdle layout exceeds the terrain boundary: "
+            f"outer half-size is {outer_half_size_pixels * cfg.horizontal_scale:.3f} m, "
+            f"terrain half-size is {terrain_half_size_pixels * cfg.horizontal_scale:.3f} m"
+        )
     
     # Build nested structure from inside to outside
     # Structure from inside to outside: 

@@ -758,6 +758,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
             platform_width=1.5,
             num_hurdles=2,
             first_hurdle_distance=2.0,
+            inter_hurdle_gap_range=(1.2, 0.9),
             hurdle_height_range=(0.25, 0.35),
             hurdle_width_pixels=2,
             flat_patch_sampling=dict(_DEPTH6_FLAT_PATCH_TARGET),

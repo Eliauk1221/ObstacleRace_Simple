@@ -497,6 +497,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         platform_width=1.5,
                         num_hurdles=2,
                         first_hurdle_distance=2.0,
+                        inter_hurdle_gap_range=(1.2, 0.9),
                         hurdle_height_range=(0.3, 0.3),
                         hurdle_width_pixels=2,
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
