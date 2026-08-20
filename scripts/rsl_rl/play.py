@@ -217,7 +217,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.env_spacing = 2.5
 
     # env_cfg.commands.base_velocity.rel_standing_envs = 0.0
-    # env_cfg.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
+    env_cfg.commands.base_velocity.ranges.lin_vel_x = (0.0, 4.0)
     # env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
     # env_cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
     # env_cfg.commands.base_velocity.ranges.zero_prob = [0.0, 0.0, 0.0]
@@ -268,13 +268,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # }
 
         # # 选项0: 平地
-        # env_cfg.scene.terrain.terrain_generator.sub_terrains = {
-        #     "plane": terrain_gen.HfRandomUniformTerrainCfg(
-        #         proportion=0.1,
-        #         noise_range=(0.0, 0.0),
-        #         noise_step=0.02,
-        #     )
-        # }
+        env_cfg.scene.terrain.terrain_generator.sub_terrains = {
+            "plane": terrain_gen.HfRandomUniformTerrainCfg(
+                proportion=0.1,
+                noise_range=(0.0, 0.0),
+                noise_step=0.02,
+            )
+        }
 
         # # 选项1: 带噪声的下斜坡
         # env_cfg.scene.terrain.terrain_generator.sub_terrains = {
@@ -485,7 +485,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     st: terrain_gen.HfHurdleTerrainCfg(
                         proportion=1.0,
                         platform_width=1.5,
-                        hurdle_height_range=(0.05, 0.20),
+                        hurdle_height_range=(0.3, 0.3),
                         hurdle_width_pixels=(2, 2, 3),
                         flat_patch_sampling=_flat_patch_target_for_pose_command(),
                     )
@@ -551,7 +551,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env_cfg.scene.terrain.terrain_generator.sub_terrains = {
                     st: spiral_stair_cfg_type(
                         proportion=1.0,
-                        step_height_range=(0.05, 0.25),
+                        step_height_range=(0.15, 0.15),
                         num_steps=7,
                         center_tread_depth=0.33,
                         usable_tread_width=2.0,
@@ -618,7 +618,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("[WARN] Keyboard control requested but base_velocity command not found in env config.")
         else:
             # 仅覆盖 play 阶段的键盘指令范围
-            base_velocity_cfg.ranges.lin_vel_x = (0.0, 3.0)
+            base_velocity_cfg.ranges.lin_vel_x = (0.0, 4.0)
             base_velocity_cfg.ranges.lin_vel_y = (-0.5, 0.5)
             base_velocity_cfg.ranges.ang_vel_z = (-1.0, 1.0)
 
@@ -686,6 +686,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    contact_sensor = env.unwrapped.scene.sensors["contact_sensor"]
+    foot_contact_ids, _ = contact_sensor.find_bodies(
+        ["l_leg_ankle_roll_link", "r_leg_ankle_roll_link"],
+        preserve_order=True,
+    )
 
     command_listener = None
     command_lock = threading.Lock()
@@ -1326,7 +1331,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         # 使用raycaster_camera的visualizer可视化注意力权重
                         raycaster_camera.ray_visualizer.visualize(translations=ray_hits_valid, marker_indices=marker_indices_valid)
                         
-            # print(f"Command: {env.unwrapped.command_manager.get_command('base_velocity').cpu().numpy()[0]}, Current Velocity: {env.unwrapped.robot.data.root_lin_vel_b.cpu().numpy()[0]}")
+            command = env.unwrapped.command_manager.get_command("base_velocity")[0].detach().cpu().tolist()
+            base_lin_vel_b = env.unwrapped.scene["robot"].data.root_lin_vel_b[0].detach().cpu().tolist()
+            recent_foot_forces_w = contact_sensor.data.net_forces_w_history[0, :, foot_contact_ids, :]
+            peak_foot_force = torch.linalg.vector_norm(recent_foot_forces_w, dim=-1).amax(dim=0).cpu().tolist()
+            peak_foot_force_z = recent_foot_forces_w[..., 2].abs().amax(dim=0).cpu().tolist()
+            print(
+                f"[STATE][step={timestep}] "
+                f"command(x,y,yaw)=({command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}) "
+                f"base_lin_vel_b(x,y,z)=({base_lin_vel_b[0]:.3f}, {base_lin_vel_b[1]:.3f}, {base_lin_vel_b[2]:.3f}) "
+                f"landing_force_N(L,R)=({peak_foot_force[0]:.1f}, {peak_foot_force[1]:.1f}) "
+                f"landing_Fz_N(L,R)=({peak_foot_force_z[0]:.1f}, {peak_foot_force_z[1]:.1f})"
+            )
         timestep += 1
         if args_cli.video:
             # Exit the play loop after recording one video

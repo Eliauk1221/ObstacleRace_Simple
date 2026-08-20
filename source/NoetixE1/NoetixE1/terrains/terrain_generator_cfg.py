@@ -652,7 +652,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "noisy_slope_up": HfNoisyPyramidSlopedTerrainCfg(
             proportion=0.1,
-            slope_range=(0.1, 0.4),
+            slope_range=(0.1, 0.7002075382),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
             num_obstacles=0,
@@ -663,7 +663,7 @@ DEPTH_TERRAINS_CFG6 = FiledTerrainGeneratorCfg(
         ),
         "noisy_slope_down": HfNoisyInvertedPyramidSlopedTerrainCfg(
             proportion=0.1,
-            slope_range=(0.15, 0.4),
+            slope_range=(0.15, 0.7002075382),
             noise_range=(0.01, 0.03),
             noise_step=0.01,
             num_obstacles=0,

@@ -72,6 +72,21 @@ gym.register(
 )
 
 gym.register(
+    id="WalkRun-E1-AMP-Old-Him-Depth-MoE-NoHurdle",
+    entry_point="NoetixE1.tasks.walkrun.noetix_e1.env:ManagerBasedRLAmpEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.walkrun_amp_depth_no_hurdle_cfg:WalkRunDepthNoHurdleEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_amp_old_him_depth_moe_no_hurdle_ppo_cfg:"
+            "AmpPpoNoHurdleDepthRunnerCfg"
+        ),
+    },
+)
+
+gym.register(
     id="WalkRun-E1-AMP-Old-Him-Double-Depth-MoE",
     entry_point="NoetixE1.tasks.walkrun.noetix_e1.env:ManagerBasedRLAmpEnv",
     disable_env_checker=True,

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 # Global state for adaptive terrain sampling (similar to mimic task's adaptive sampling)
 _adaptive_terrain_state: dict[str, dict] = {}
+_high_speed_curriculum_state: dict[str, dict[str, float | int]] = {}
 
 def _get_terrain_type_from_position(
     env: ManagerBasedRLEnv,
@@ -517,6 +518,95 @@ def _decide_terrain_batch(
         new_levels[move_up_not_max_mask] = torch.clamp(new_levels[move_up_not_max_mask] + 1, max=max_level)
 
     return new_types, new_levels
+
+
+def high_speed_tracking_curriculum(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    command_name: str,
+    terrain_types: tuple[str, ...],
+    max_speeds: tuple[float, ...],
+    promotion_thresholds: tuple[float, ...],
+    min_samples: int = 256,
+    eval_bandwidth: float = 0.25,
+    ema_alpha: float = 0.1,
+) -> dict[str, float]:
+    """Raise the command-speed ceiling after near-ceiling commands are tracked well.
+
+    The curriculum is monotonic. At every stage it evaluates the unweighted
+    high-speed tracking reward in ``[0, 1]`` only for commands near the current
+    ceiling. Once its EMA reaches the stage threshold with enough samples, the
+    ceiling advances to the next value.
+    """
+    if not max_speeds:
+        raise ValueError("max_speeds must not be empty.")
+    if tuple(sorted(max_speeds)) != max_speeds:
+        raise ValueError("max_speeds must be sorted in ascending order.")
+    if len(promotion_thresholds) != len(max_speeds) - 1:
+        raise ValueError("promotion_thresholds must contain one value per promotion.")
+    if any(not 0.0 <= threshold <= 1.0 for threshold in promotion_thresholds):
+        raise ValueError("promotion_thresholds must be in [0, 1].")
+    if min_samples <= 0 or eval_bandwidth <= 0.0 or not 0.0 < ema_alpha <= 1.0:
+        raise ValueError("min_samples, eval_bandwidth and ema_alpha must be positive.")
+
+    state_key = f"{id(env)}:{command_name}"
+    state = _high_speed_curriculum_state.setdefault(
+        state_key, {"stage": 0, "tracking_ema": 0.0, "sample_count": 0}
+    )
+    stage = int(state["stage"])
+    current_max = float(max_speeds[stage])
+    command_term = env.command_manager.get_term(command_name)
+
+    env_ids_tensor = torch.as_tensor(env_ids, dtype=torch.long, device=env.device)
+    if env_ids_tensor.numel() > 0:
+        terrain_gen_cfg = env.scene.terrain.cfg.terrain_generator
+        terrain_names = list(terrain_gen_cfg.sub_terrains.keys())
+        desired_columns = [
+            terrain_names.index(terrain_type) for terrain_type in terrain_types if terrain_type in terrain_names
+        ]
+        cached_columns = getattr(env.unwrapped, "_current_terrain_col_indices", None)
+        if cached_columns is None:
+            cached_columns = env.scene.terrain.terrain_types
+        selected_columns = cached_columns[env_ids_tensor].long()
+        terrain_mask = torch.zeros_like(selected_columns, dtype=torch.bool)
+        for column in desired_columns:
+            terrain_mask |= selected_columns == column
+
+        commands_x = env.command_manager.get_command(command_name)[env_ids_tensor, 0]
+        high_speed_mask = command_term.high_speed_mask[env_ids_tensor]
+        near_ceiling = commands_x >= current_max - float(eval_bandwidth)
+        sample_mask = terrain_mask & high_speed_mask & near_ceiling
+        if sample_mask.any():
+            batch_scores = command_term.high_speed_tracking_ratio()[env_ids_tensor][sample_mask]
+            batch_score = float(batch_scores.mean().item())
+            previous_samples = int(state["sample_count"])
+            state["tracking_ema"] = (
+                batch_score
+                if previous_samples == 0
+                else (1.0 - float(ema_alpha)) * float(state["tracking_ema"])
+                + float(ema_alpha) * batch_score
+            )
+            state["sample_count"] = previous_samples + int(sample_mask.sum().item())
+
+    if (
+        stage < len(max_speeds) - 1
+        and int(state["sample_count"]) >= min_samples
+        and float(state["tracking_ema"]) >= float(promotion_thresholds[stage])
+    ):
+        stage += 1
+        state.update({"stage": stage, "tracking_ema": 0.0, "sample_count": 0})
+        current_max = float(max_speeds[stage])
+
+    for terrain_type in terrain_types:
+        ranges = command_term.cfg.terrain_specific_high_speed_ranges[terrain_type]
+        ranges.lin_vel_x = (min(float(ranges.lin_vel_x[0]), current_max), current_max)
+
+    return {
+        "max_speed": current_max,
+        "stage": float(stage),
+        "tracking_score": float(state["tracking_ema"]),
+        "sample_count": float(state["sample_count"]),
+    }
 
 
 def terrain_levels_vel(

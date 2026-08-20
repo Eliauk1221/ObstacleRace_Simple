@@ -57,7 +57,7 @@ def track_lin_x_speed_linear(
 
     aggressive_mask = abs_cmd_x > 2.5
     undershoot = torch.abs(vel_x) < abs_cmd_x
-    undershoot_coef = torch.where(abs_cmd_x > 4.0, 1.0, 0.5)
+    undershoot_coef = torch.where(abs_cmd_x >= 3.0, 1.0, 0.5)
     undershoot_penalty = torch.where(undershoot, undershoot_coef * rel_error, 0.0)
     reward = reward - undershoot_penalty * aggressive_mask.float()
 
@@ -562,10 +562,15 @@ def joint_deviation_l1_when_standing(
     return torch.sum(torch.abs(angle), dim=1) * zero_flag
 
 
-def energy(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+def energy(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    high_speed_scale: float = 1.0,
+    command_name: str = "base_velocity",
+) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     reward = torch.norm(torch.abs(asset.data.applied_torque * asset.data.joint_vel), dim=-1)
-    return reward
+    return _rescale_high_speed_penalty(reward, env, high_speed_scale, command_name)
 
 
 def joint_acc_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -602,6 +607,65 @@ def _high_speed_command_mask(
     if high_speed_mask is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=device)
     return high_speed_mask.to(device=device, dtype=torch.bool)
+
+
+def _rescale_high_speed_penalty(
+    penalty: torch.Tensor,
+    env: ManagerBasedRLEnv,
+    high_speed_scale: float,
+    command_name: str,
+) -> torch.Tensor:
+    """Scale a regularization penalty only for explicitly sampled high-speed commands."""
+    if not 0.0 <= high_speed_scale <= 1.0:
+        raise ValueError(f"high_speed_scale must be in [0, 1], got {high_speed_scale}.")
+    high_speed = _high_speed_command_mask(env, command_name, penalty.device)
+    scale = torch.where(high_speed, float(high_speed_scale), 1.0)
+    return penalty * scale
+
+
+def joint_torques_l2_high_speed_rescaled(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    high_speed_scale: float = 0.5,
+    command_name: str = "base_velocity",
+) -> torch.Tensor:
+    """Penalize joint torques less strongly for explicitly sampled high-speed commands."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    penalty = torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+    return _rescale_high_speed_penalty(penalty, env, high_speed_scale, command_name)
+
+
+def action_rate_l2_high_speed_rescaled(
+    env: ManagerBasedRLEnv,
+    high_speed_scale: float = 0.5,
+    command_name: str = "base_velocity",
+) -> torch.Tensor:
+    """Penalize action changes less strongly for explicitly sampled high-speed commands."""
+    penalty = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
+    return _rescale_high_speed_penalty(penalty, env, high_speed_scale, command_name)
+
+
+def high_speed_undershoot_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    command_name: str = "base_velocity",
+    min_command_speed: float = 2.5,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize only forward-speed undershoot during explicitly sampled high-speed commands."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    vel_yaw = math_utils.quat_apply_inverse(
+        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+    )
+    cmd_x = command[:, 0]
+    relative_undershoot = torch.relu(cmd_x - vel_yaw[:, 0]) / torch.clamp(torch.abs(cmd_x), min=1.0)
+    active = (
+        _high_speed_command_mask(env, command_name, relative_undershoot.device)
+        & _terrain_type_mask(env, terrain_types, relative_undershoot.device)
+        & (cmd_x >= float(min_command_speed))
+    )
+    return relative_undershoot * active.float()
 
 
 def _high_speed_positive_reward_gate(
@@ -802,6 +866,28 @@ def stairs_outward_progress_reward(
         speed_cap = torch.minimum(speed_cap, command[:, 0].clamp(min=0.0))
     reward = torch.minimum(outward_speed, speed_cap)
     return reward * active.float()
+
+
+def stairs_stall_penalty(
+    env: ManagerBasedRLEnv,
+    terrain_types: tuple[str, ...],
+    min_forward_command: float = 0.1,
+    min_outward_speed: float = 0.05,
+    grace_steps: int = 50,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize complete stalls on stairs without requiring command-speed tracking."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command("base_velocity")
+    local_xy = asset.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    outward_direction = local_xy / torch.linalg.vector_norm(local_xy, dim=1, keepdim=True).clamp_min(1.0e-6)
+    outward_speed = torch.sum(asset.data.root_lin_vel_w[:, :2] * outward_direction, dim=1)
+    active = (
+        _terrain_type_mask(env, terrain_types, asset.device)
+        & (command[:, 0] > float(min_forward_command))
+        & (env.episode_length_buf >= int(grace_steps))
+    )
+    return (active & (outward_speed < float(min_outward_speed))).float()
 
 
 def stair_large_step_penalty(

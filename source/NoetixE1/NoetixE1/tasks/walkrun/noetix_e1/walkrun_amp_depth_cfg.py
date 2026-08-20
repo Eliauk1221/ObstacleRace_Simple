@@ -42,6 +42,8 @@ from . import mdp
 from NoetixE1.assets.robots.e1.e1 import E1_23DOF_CFG, E1_23DOF_ACTION_SCALE  # isort:skip
 
 E1_RUNNING_MOTION_FILE = f"{ASSET_DIR}/datasets/walkrun/e1/e1_running.txt"
+STAIR_DOWN_MOTION_FILE = f"{ASSET_DIR}/datasets/walkrun/e1/stair-down.txt"
+STAIR_UP_MOTION_FILE = f"{ASSET_DIR}/datasets/walkrun/e1/stair-up.txt"
 HURDLE_MOTION_FILE = (
     f"{ASSET_DIR}/datasets/parkour/e1/sport_meet_23_old_urdf/"
     "sport_meet_hurdle_amp_2m_continuous_110_175_old_urdf.json"
@@ -380,14 +382,14 @@ class CommandsCfg:
         },
         terrain_specific_high_speed_ranges={
             "plane": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
-                lin_vel_x=(1.5, 3.0),
+                lin_vel_x=(1.5, 4.0),
                 lin_vel_y=(0.0, 0.0),
                 ang_vel_z=(-1.0, 1.0),
                 zero_prob=[0.0, 1.0, 0.5],
                 probability=0.3,
             ),
             "rough_flat": mdp.UniformVelocityWithZeroCommandCfg.HighSpeedRanges(
-                lin_vel_x=(1.5, 3.0),
+                lin_vel_x=(1.5, 4.0),
                 lin_vel_y=(0.0, 0.0),
                 ang_vel_z=(-1.0, 1.0),
                 zero_prob=[0.0, 1.0, 0.5],
@@ -2009,7 +2011,14 @@ class WalkRunDepthEnvCfg(ManagerBasedRLEnvCfg):
         # ----------------------------------------------AMP----------------------------------------------
         self.motion_loader_name = "MotionLoaderE1"
         # self.motion_files = sorted(glob.glob(f"{ASSET_DIR}/datasets/walkrun/e1/*"))
-        self.motion_files = sorted([*DEFAULT_RSI_MOTION_FILES, HURDLE_MOTION_FILE])
+        self.motion_files = sorted(
+            [
+                *DEFAULT_RSI_MOTION_FILES,
+                STAIR_DOWN_MOTION_FILE,
+                STAIR_UP_MOTION_FILE,
+                HURDLE_MOTION_FILE,
+            ]
+        )
         self.reference_observation_horizon = 4
         self.num_preload_transitions = 200000
         self.observations.discriminator.history_length = self.reference_observation_horizon
