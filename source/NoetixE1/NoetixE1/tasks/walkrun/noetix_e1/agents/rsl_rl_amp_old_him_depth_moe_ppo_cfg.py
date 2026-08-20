@@ -33,7 +33,7 @@ class RslRlAmpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     discriminator_loss_function = "WassersteinLoss"  # BCEWithLogitsLoss, MSELoss, WassersteinLoss
     amp_replay_buffer_size = 200000
     normalize_advantage_per_mini_batch = False
-    foothold_imagination_enabled = True
+    foothold_imagination_enabled = False
     foothold_learning_rate = 1.0e-3
     foothold_hidden_dims = (512, 256, 128)
     foothold_min_sigma = 0.02
@@ -46,7 +46,7 @@ class RslRlAmpPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
         use_data_augmentation=True,
         use_mirror_loss=False,
         data_augmentation_func="NoetixE1.tasks.walkrun.noetix_e1.mdp.symmetry.e1_old_him:data_augmentation_func_e1",
-        mirror_loss_coeff=1.0,
+        mirror_loss_coeff=2.0,
     )
     rnd_cfg = None
 
